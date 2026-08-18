@@ -3,4 +3,4 @@
 # pipeline and adding adaptive delays between requests.
 - insert:
     - id: agent-rate-limit
-      name: '@deepseek-ai/dsh-agent-rate-limit'
+      name: '@zhourenke/dsh-agent-rate-limit'

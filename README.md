@@ -1,4 +1,4 @@
-# @deepseek-ai/dsh-agent-rate-limit
+# @zhourenke/dsh-agent-rate-limit
 
 English | [中文](README.zh.md)
 
@@ -39,9 +39,11 @@ The plugin intercepts two Waterfall events:
 
 ## Installation
 
-This plugin is a **DSH bundle patch** — it must be registered in a DSH profile's `package.json` and listed in that profile's `dsh.profile.bundles` array.
+This plugin is a **DSH profile bundle**. The only supported installation method is to place the package folder directly into a DSH profile's `node_modules` and list it in that profile's `dsh.profile.bundles` array. No `npm link`, no pnpm, and no registry access is required.
 
 ### Find your DSH profile
+
+First, determine which profile you are using:
 
 ```powershell
 # List available profiles
@@ -50,38 +52,54 @@ Get-ChildItem "$env:USERPROFILE\.dsh\profiles" -Name
 
 Common profiles: `web`, `tui`, `headless`. The profile directory is `$env:USERPROFILE\.dsh\profiles\<name>\`.
 
-### Option A: Local development (npm link)
+### Step 1 — Copy the package folder into the profile
 
 ```powershell
-# Step 1 — Create a global link
-cd C:\path\to\dsh-agent-rate-limit
-npm link
+# Create the scoped directory if it does not exist
+$target = "$env:USERPROFILE\.dsh\profiles\<name>\node_modules\@zhourenke"
+New-Item -ItemType Directory -Force $target
 
-# Step 2 — Register the plugin in your profile's package.json
-# Edit $env:USERPROFILE\.dsh\profiles\<name>\package.json
-# Add "@deepseek-ai/dsh-agent-rate-limit" to dsh.profile.bundles
-
-# Step 3 — Restart DSH
+# Copy the whole plugin folder (package.json, cordis.patch.yml, lib/, ...)
+Copy-Item -Recurse C:\path\to\dsh-agent-rate-limit "$target\"
 ```
 
-### Option B: Published npm package (future)
+The copied tree must contain `package.json` (with `dsh.bundle.patch`), `cordis.patch.yml`, and `lib/`.
 
-```powershell
-dsh plugin --profile <name> add @deepseek-ai/dsh-agent-rate-limit
+### Step 2 — Register the bundle
+
+Edit `$env:USERPROFILE\.dsh\profiles\<name>\package.json`:
+
+```diff
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
++       "@zhourenke/dsh-agent-rate-limit"
+      ]
+    }
+  }
 ```
 
-### Option C: file: protocol (no npm link)
+No `dependencies` entry is needed — DSH resolves bundles purely by package name from the profile's `node_modules` at startup (a `dependencies` entry only matters to `pnpm install`, which is not used for this plugin).
 
-```powershell
-cd "$env:USERPROFILE\.dsh\profiles\<name>"
-pnpm add "file:C:\path\to\dsh-agent-rate-limit"
-```
+### Step 3 — Restart DSH
 
-Then manually add `"@deepseek-ai/dsh-agent-rate-limit"` to the `dsh.profile.bundles` array in the same `package.json`, and restart DSH.
+The plugin is loaded on the next DSH startup. When you update the plugin source, re-copy the folder (or use a junction if you prefer live updates) and restart DSH.
 
 ### Verify the installation
 
-After restarting DSH, the plugin starts automatically. Check the DSH logs for `[agent-rate-limit]` entries confirming that the rate limiter is active.
+After restarting DSH, check the startup logs for `[agent-rate-limit]` entries confirming that the rate limiter is active:
+
+```powershell
+dsh web 2>&1 | Select-String "agent-rate-limit"
+```
+
+Expected output:
+
+```
+[agent-rate-limit] Plugin loaded. TPM: 1200000, RPM: 15000, factor: 0.8, window: 60000ms
+```
 
 ## Configuration
 
@@ -98,7 +116,7 @@ After restarting DSH, the plugin starts automatically. Check the DSH logs for `[
 ```yaml
 # In your profile's cordis config or agent preset:
 - id: agent-rate-limit
-  name: '@deepseek-ai/dsh-agent-rate-limit'
+  name: '@zhourenke/dsh-agent-rate-limit'
   config:
     tpmLimit: 2000000     # 2M TPM for a different provider
     rpmLimit: 5000        # 5K RPM

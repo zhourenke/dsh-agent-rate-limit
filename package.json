@@ -1,5 +1,5 @@
 {
-  "name": "@deepseek-ai/dsh-agent-rate-limit",
+  "name": "@zhourenke/dsh-agent-rate-limit",
   "description": "Agent loop rate limiter — prevents TPM/RPM limit violations by intercepting the LLM streaming pipeline and adding adaptive delays between requests",
   "version": "0.1.0",
   "publishConfig": {
@@ -7,7 +7,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ParkGarden/dsh-agent-rate-limit.git"
+    "url": "git+https://github.com/zhourenke/dsh-agent-rate-limit.git"
   },
   "type": "module",
   "main": "lib/index.js",

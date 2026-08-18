@@ -1,5 +1,5 @@
 /**
- * @deepseek-ai/dsh-agent-rate-limit
+ * @zhourenke/dsh-agent-rate-limit
  *
  * An agent loop rate limiter that prevents TPM (Tokens Per Minute) and
  * RPM (Requests Per Minute) limit violations by intercepting the LLM
@@ -8,7 +8,7 @@
  * Supports configurable limits, exponential backoff on rate-limit errors,
  * and a sliding-window algorithm that tracks both input and output tokens.
  *
- * @module @deepseek-ai/dsh-agent-rate-limit
+ * @module @zhourenke/dsh-agent-rate-limit
  */
 
 import z from '@deepseek-ai/schemastery'

@@ -1,4 +1,4 @@
-# @deepseek-ai/dsh-agent-rate-limit
+# @zhourenke/dsh-agent-rate-limit
 
 [English](README.md) | 中文
 
@@ -39,9 +39,11 @@
 
 ## 安装
 
-本插件是一个 **DSH 配置文件包（bundle patch）**——必须在 DSH 配置文件的 `package.json` 中注册，并添加到 `dsh.profile.bundles` 列表中。
+本插件是一个 **DSH 配置文件包（profile bundle）**。目前唯一支持的安装方式是把插件文件夹**直接放置**到 DSH 配置文件的 `node_modules` 中，并在该配置文件的 `dsh.profile.bundles` 列表里注册。**无需 `npm link`、无需 pnpm、无需访问 npm registry**。
 
 ### 找到你的 DSH 配置文件
+
+首先确定你使用的是哪个配置文件（profile）：
 
 ```powershell
 # 列出所有可用的配置文件
@@ -50,38 +52,54 @@ Get-ChildItem "$env:USERPROFILE\.dsh\profiles" -Name
 
 常见的配置文件：`web`、`tui`、`headless`。配置文件目录为 `$env:USERPROFILE\.dsh\profiles\<名称>\`。
 
-### 方式 A：本地开发（npm link）
+### 第 1 步 — 把插件文件夹复制进配置文件
 
 ```powershell
-# 第 1 步 — 创建全局链接
-cd C:\path\to\dsh-agent-rate-limit
-npm link
+# 若作用域目录不存在则创建
+$target = "$env:USERPROFILE\.dsh\profiles\<名称>\node_modules\@zhourenke"
+New-Item -ItemType Directory -Force $target
 
-# 第 2 步 — 在配置文件的 package.json 中注册插件
-# 编辑 $env:USERPROFILE\.dsh\profiles\<名称>\package.json
-# 将 "@deepseek-ai/dsh-agent-rate-limit" 添加到 dsh.profile.bundles
-
-# 第 3 步 — 重启 DSH
+# 复制整个插件文件夹（package.json、cordis.patch.yml、lib/ 等）
+Copy-Item -Recurse C:\path\to\dsh-agent-rate-limit "$target\"
 ```
 
-### 方式 B：通过 npm 发布后（未来）
+复制后的目录必须包含 `package.json`（含 `dsh.bundle.patch`）、`cordis.patch.yml` 和 `lib/`。
 
-```powershell
-dsh plugin --profile <名称> add @deepseek-ai/dsh-agent-rate-limit
+### 第 2 步 — 注册 bundle
+
+编辑 `$env:USERPROFILE\.dsh\profiles\<名称>\package.json`：
+
+```diff
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
++       "@zhourenke/dsh-agent-rate-limit"
+      ]
+    }
+  }
 ```
 
-### 方式 C：file: 协议（无需 npm link）
+**无需在 `dependencies` 中添加任何条目**——DSH 启动时只按包名从配置文件的 `node_modules` 物理解析 bundle（`dependencies` 条目只对 `pnpm install` 有意义，本插件不依赖它）。
 
-```powershell
-cd "$env:USERPROFILE\.dsh\profiles\<名称>"
-pnpm add "file:C:\path\to\dsh-agent-rate-limit"
-```
+### 第 3 步 — 重启 DSH
 
-然后在同一 `package.json` 的 `dsh.profile.bundles` 数组中手动添加 `"@deepseek-ai/dsh-agent-rate-limit"`，并重启 DSH。
+下次启动 DSH 时插件会被加载。更新插件源码后重新复制文件夹（或使用 junction 以实现热更新），然后重启 DSH。
 
 ### 验证安装
 
-重启 DSH 后，插件将自动启动。检查 DSH 日志中是否有 `[agent-rate-limit]` 条目，确认速率限制器已激活。
+重启 DSH 后，检查启动日志中是否有 `[agent-rate-limit]` 条目，确认速率限制器已激活：
+
+```powershell
+dsh web 2>&1 | Select-String "agent-rate-limit"
+```
+
+预期输出：
+
+```
+[agent-rate-limit] Plugin loaded. TPM: 1200000, RPM: 15000, factor: 0.8, window: 60000ms
+```
 
 ## 配置
 
@@ -98,7 +116,7 @@ pnpm add "file:C:\path\to\dsh-agent-rate-limit"
 ```yaml
 # 在配置文件的 cordis 配置或 agent preset 中：
 - id: agent-rate-limit
-  name: '@deepseek-ai/dsh-agent-rate-limit'
+  name: '@zhourenke/dsh-agent-rate-limit'
   config:
     tpmLimit: 2000000     # 对于其他供应商，2M TPM
     rpmLimit: 5000        # 5K RPM
