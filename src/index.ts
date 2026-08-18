@@ -29,6 +29,9 @@ const DEFAULT_RPM_LIMIT = 15_000
 /** Default safety factor (0.8 = use 80% of the limit to leave buffer). */
 const DEFAULT_SAFETY_FACTOR = 0.8
 
+/** Default: silently retry 429 errors (true) or surface them to the user (false). */
+const DEFAULT_RETRY_ON_429 = true
+
 /** Default maximum exponential backoff delay in milliseconds. */
 const DEFAULT_MAX_BACKOFF_MS = 30_000
 
@@ -53,8 +56,8 @@ let consecutiveErrors = 0
 /** @internal Timestamp of the last rate-limit error (ms). 0 = no recent error. */
 let lastRateLimitErrorAt = 0
 
-/** @internal Timestamp of the last rate-limit error (ms). */
-let lastRateLimitErrorAt = 0
+/** @internal Whether to silently retry on 429 errors. */
+let retryOn429 = DEFAULT_RETRY_ON_429
 
 /** @internal Resolved config. */
 let windowMs = DEFAULT_WINDOW_MS
@@ -73,12 +76,14 @@ function initRateLimiter(config: {
   rpmLimit: number
   safetyFactor: number
   maxBackoffMs: number
+  retryOn429: boolean
 }): void {
   windowMs = config.windowMs
   tpmLimit = config.tpmLimit
   rpmLimit = config.rpmLimit
   safetyFactor = config.safetyFactor
   maxBackoffMs = config.maxBackoffMs
+  retryOn429 = config.retryOn429
   windowEntries.length = 0
   consecutiveErrors = 0
   lastRateLimitErrorAt = 0
@@ -283,6 +288,7 @@ const Config = z.object({
   rpmLimit: z.number().default(DEFAULT_RPM_LIMIT),
   safetyFactor: z.number().default(DEFAULT_SAFETY_FACTOR),
   maxBackoffMs: z.number().default(DEFAULT_MAX_BACKOFF_MS),
+  retryOn429: z.boolean().default(DEFAULT_RETRY_ON_429),
 })
 
 /**
@@ -302,9 +308,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     rpmLimit: Number(config.rpmLimit ?? DEFAULT_RPM_LIMIT),
     safetyFactor: Number(config.safetyFactor ?? DEFAULT_SAFETY_FACTOR),
     maxBackoffMs: Number(config.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS),
+    retryOn429: config.retryOn429 !== false,
   }
   initRateLimiter(cfg)
-  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms`)
+  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}`)
 
   const timer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
@@ -356,7 +363,12 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
   })
 
   /**
-   * Intercept request errors to detect rate-limit / quota responses and retry.
+   * Intercept request errors to detect HTTP 429 (rate limit / quota) and retry.
+   *
+   * Bailian (and most LLM providers) use HTTP 429 to signal both TPM/RPM
+   * rate limits and temporary quota exhaustion. In both cases a short delay
+   * followed by a retry usually resolves the issue. Set `retryOn429: false`
+   * in the config if you want 429 errors to surface to the user instead.
    */
   ctx.on('agent/request-error', async (payload: unknown, next: () => Promise<{ kind: string }>) => {
     const p = payload as {
@@ -367,36 +379,32 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     const errorCode = typeof failure?.code === 'string' ? failure.code : ''
     const httpStatus = typeof failure?.statusCode === 'number' ? failure.statusCode : 0
 
-    // Detect QUOTA errors (e.g. "Allocated quota exceeded") — these will NOT
-    // resolve with waiting, so do NOT retry. Let the error propagate to the user.
-    const isQuotaError =
-      /quota/i.test(errorCode) ||
-      /quota/i.test(errorMessage) ||
-      (httpStatus === 429 && /quota/i.test(errorMessage))
-
-    if (isQuotaError) {
-      console.log(`[agent-rate-limit] ⚠ Quota error detected (${errorCode}: ${errorMessage.slice(0, 120)}). NOT retrying — please increase your API quota.`)
-      return next() // Delegate to default handler; let the error surface
-    }
-
-    // Detect rate limit errors: HTTP 429, or error text matching common patterns
-    const isRateLimit =
-      errorCode === 'RATE_LIMITED' ||
-      errorCode === '429' ||
+    // Detect HTTP 429: check statusCode, errorCode, and message text
+    const is429 =
       httpStatus === 429 ||
+      errorCode === '429' ||
+      errorCode === 'RATE_LIMITED' ||
+      errorCode === 'QUOTA' ||
       /rate\s*limit/i.test(errorMessage) ||
       /too\s+many\s+requests/i.test(errorMessage) ||
       /tpm|rpm|token.*limit/i.test(errorMessage) ||
-      /throttl/i.test(errorMessage)
+      /throttl/i.test(errorMessage) ||
+      /quota/i.test(errorMessage) ||
+      /429/i.test(errorMessage)
 
-    if (isRateLimit) {
-      recordError()
-      const backoff = getBackoffDelay()
-      console.log(`[agent-rate-limit] Rate limit error #${consecutiveErrors} detected (${errorCode}: ${errorMessage.slice(0, 80)}). Backoff: ${backoff}ms`)
-      return { kind: 'retry' }
+    if (is429) {
+      if (retryOn429) {
+        recordError()
+        const backoff = getBackoffDelay()
+        console.log(`[agent-rate-limit] 429 detected, retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
+        return { kind: 'retry' }
+      } else {
+        console.log(`[agent-rate-limit] 429 detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
+        return next()
+      }
     }
 
-    // For non-rate-limit errors, delegate to the default handler
+    // For non-429 errors, delegate to the default handler
     return next()
   })
 }
@@ -407,5 +415,6 @@ export {
   DEFAULT_TPM_LIMIT,
   DEFAULT_RPM_LIMIT,
   DEFAULT_SAFETY_FACTOR,
+  DEFAULT_RETRY_ON_429,
   DEFAULT_MAX_BACKOFF_MS,
 }
