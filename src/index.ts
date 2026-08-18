@@ -125,11 +125,17 @@ function addToWindow(tokens: number, now: number): void {
 
 /**
  * Record a rate-limit error for backoff calculation.
+ * Only updates the timestamp if enough time has passed since the last
+ * error (10s), preventing the backoff from being reset on every retry
+ * within a rapid burst of 429 responses.
  * @internal
  */
 function recordError(): void {
   consecutiveErrors++
-  lastRateLimitErrorAt = Date.now()
+  const now = Date.now()
+  if (now - lastRateLimitErrorAt > 10_000) {
+    lastRateLimitErrorAt = now
+  }
 }
 
 /**
