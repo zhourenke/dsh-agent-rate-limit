@@ -50,6 +50,12 @@ const windowEntries: WindowEntry[] = []
 /** @internal Consecutive rate-limit error counter. */
 let consecutiveErrors = 0
 
+/** @internal Timestamp of the last rate-limit error (ms). 0 = no recent error. */
+let lastRateLimitErrorAt = 0
+
+/** @internal Timestamp of the last rate-limit error (ms). */
+let lastRateLimitErrorAt = 0
+
 /** @internal Resolved config. */
 let windowMs = DEFAULT_WINDOW_MS
 let tpmLimit = DEFAULT_TPM_LIMIT
@@ -75,6 +81,7 @@ function initRateLimiter(config: {
   maxBackoffMs = config.maxBackoffMs
   windowEntries.length = 0
   consecutiveErrors = 0
+  lastRateLimitErrorAt = 0
 }
 
 /**
@@ -117,6 +124,7 @@ function addToWindow(tokens: number, now: number): void {
  */
 function recordError(): void {
   consecutiveErrors++
+  lastRateLimitErrorAt = Date.now()
 }
 
 /**
@@ -125,29 +133,42 @@ function recordError(): void {
  */
 function resetErrors(): void {
   consecutiveErrors = 0
+  // Keep lastRateLimitErrorAt so the backoff still decays gradually
 }
 
 /**
- * Calculate the exponential backoff delay based on consecutive errors.
+ * Calculate the adaptive backoff delay based on recent errors.
+ * Uses a time-window approach: if a rate-limit error happened within the
+ * last 60 seconds, scale the delay by how recent it was.
  * @internal
  */
 function getBackoffDelay(): number {
-  if (consecutiveErrors === 0) return 0
-  // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at maxBackoffMs
-  return Math.min(
-    Math.pow(2, consecutiveErrors - 1) * 1000,
+  if (lastRateLimitErrorAt === 0) return 0
+  const msSinceError = Date.now() - lastRateLimitErrorAt
+  // If the last error was over 60s ago, no backoff
+  if (msSinceError > 60_000) return 0
+  // Scale delay: 1s at t=0, 2s at t=-30s, 4s at t=-45s, 8s at t=-52.5s...
+  // Formula: 1000 * 2^(1 - msSinceError/30000) → 1s to 32s, capped
+  const exponent = 1 - msSinceError / 30_000
+  const delay = Math.min(
+    Math.pow(2, Math.max(0, exponent)) * 1000,
     maxBackoffMs,
   )
+  return Math.round(delay)
 }
 
 /**
- * Get the effective TPM limit, reduced by consecutive errors.
+ * Get the effective TPM limit, reduced when a recent rate-limit error occurred.
+ * The reduction decays linearly over 60 seconds after the last error.
  * @internal
  */
 function getEffectiveTpmLimit(): number {
-  // Each consecutive error reduces the limit by 10%, minimum 30% of original
-  const factor = Math.max(0.3, safetyFactor - consecutiveErrors * 0.1)
-  return tpmLimit * factor
+  if (lastRateLimitErrorAt === 0) return tpmLimit * safetyFactor
+  const msSinceError = Date.now() - lastRateLimitErrorAt
+  if (msSinceError > 60_000) return tpmLimit * safetyFactor
+  // Reduce by up to 50% right after an error, decaying back to safetyFactor
+  const reduction = Math.max(0.5, 1 - msSinceError / 120_000)
+  return tpmLimit * safetyFactor * reduction
 }
 
 /**
@@ -311,7 +332,8 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       if (delay > 0) {
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
-        console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)}, RPM: ${windowEntries.length}/${rpmLimit}, errors: ${consecutiveErrors})`)
+        const sinceError = lastRateLimitErrorAt > 0 ? Math.round((Date.now() - lastRateLimitErrorAt) / 1000) : 0
+        console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)}, RPM: ${windowEntries.length}/${rpmLimit}, lastError: ${sinceError}s ago)`)
         await timer.timer.timeout(delay)
       }
 
@@ -334,20 +356,34 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
   })
 
   /**
-   * Intercept request errors to detect rate-limit responses and retry.
+   * Intercept request errors to detect rate-limit / quota responses and retry.
    */
   ctx.on('agent/request-error', async (payload: unknown, next: () => Promise<{ kind: string }>) => {
     const p = payload as {
-      failure?: { message?: string; code?: string }
+      failure?: { message?: string; code?: string; statusCode?: number }
     }
     const failure = p.failure
     const errorMessage = typeof failure?.message === 'string' ? failure.message : ''
     const errorCode = typeof failure?.code === 'string' ? failure.code : ''
+    const httpStatus = typeof failure?.statusCode === 'number' ? failure.statusCode : 0
+
+    // Detect QUOTA errors (e.g. "Allocated quota exceeded") — these will NOT
+    // resolve with waiting, so do NOT retry. Let the error propagate to the user.
+    const isQuotaError =
+      /quota/i.test(errorCode) ||
+      /quota/i.test(errorMessage) ||
+      (httpStatus === 429 && /quota/i.test(errorMessage))
+
+    if (isQuotaError) {
+      console.log(`[agent-rate-limit] ⚠ Quota error detected (${errorCode}: ${errorMessage.slice(0, 120)}). NOT retrying — please increase your API quota.`)
+      return next() // Delegate to default handler; let the error surface
+    }
 
     // Detect rate limit errors: HTTP 429, or error text matching common patterns
     const isRateLimit =
       errorCode === 'RATE_LIMITED' ||
       errorCode === '429' ||
+      httpStatus === 429 ||
       /rate\s*limit/i.test(errorMessage) ||
       /too\s+many\s+requests/i.test(errorMessage) ||
       /tpm|rpm|token.*limit/i.test(errorMessage) ||
@@ -355,7 +391,8 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
 
     if (isRateLimit) {
       recordError()
-      console.log(`[agent-rate-limit] Rate limit error #${consecutiveErrors} detected (${errorCode}: ${errorMessage.slice(0, 80)}). Backoff: ${getBackoffDelay()}ms`)
+      const backoff = getBackoffDelay()
+      console.log(`[agent-rate-limit] Rate limit error #${consecutiveErrors} detected (${errorCode}: ${errorMessage.slice(0, 80)}). Backoff: ${backoff}ms`)
       return { kind: 'retry' }
     }
 
