@@ -98,7 +98,7 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 Expected output:
 
 ```
-[agent-rate-limit] Plugin loaded. TPM: 1200000, RPM: 15000, factor: 0.8, window: 60000ms
+[agent-rate-limit] Plugin loaded. TPM: 1200000, RPM: 15000, factor: 0.8, window: 60000ms, retryOn429: true
 ```
 
 ## Configuration
@@ -109,7 +109,8 @@ Expected output:
 | `tpmLimit` | `1200000` | TPM (Tokens Per Minute) limit. Default matches Alibaba Cloud Bailian deepseek-v4-flash. |
 | `rpmLimit` | `15000` | RPM (Requests Per Minute) limit. |
 | `safetyFactor` | `0.8` | Safety factor (0.8 = use 80% of the limit, leaving 20% buffer). |
-| `maxBackoffMs` | `30000` | Maximum exponential backoff delay in milliseconds (30s). |
+| `maxBackoffMs` | `30000` | Maximum backoff delay in milliseconds (30s). |
+| `retryOn429` | `true` | When `true` (default), HTTP 429 responses are silently retried with adaptive backoff — the conversation continues smoothly. Set to `false` to surface 429 errors to the user. |
 
 ### Example: Adjusting for different providers
 
@@ -121,6 +122,7 @@ Expected output:
     tpmLimit: 2000000     # 2M TPM for a different provider
     rpmLimit: 5000        # 5K RPM
     safetyFactor: 0.75    # 75% utilization, 25% buffer
+    retryOn429: true      # silently retry on 429 (recommended)
 ```
 
 ## How the rate limiting works
@@ -135,13 +137,15 @@ This is intentionally conservative — it's better to delay slightly more than t
 
 ### Error recovery
 
-When a rate-limit error is detected (HTTP 429, or error text containing "rate limit", "too many requests", etc.), the plugin:
+When a rate-limit error is detected (HTTP 429, the typical response from providers like Alibaba Cloud Bailian when TPM or RPM limits are hit), the plugin:
 
-1. Records the error in the consecutive error counter
-2. Returns `{ kind: 'retry' }` to tell the agent loop to retry
-3. Applies **exponential backoff**: 1s, 2s, 4s, 8s, ... (capped at `maxBackoffMs`)
-4. **Reduces the effective TPM limit** by 10% per consecutive error (minimum 30% of original)
-5. Resets the counter when a request succeeds
+1. Records the error timestamp for adaptive backoff calculation
+2. Returns `{ kind: 'retry' }` to tell the agent loop to retry **transparently** — the user never sees the error
+3. Applies **time-based adaptive backoff**: the delay is proportional to how recently the last error occurred (4s immediately after an error, decaying to 0 over 60s)
+4. If the error persists, the backoff keeps the retry rate low, avoiding further API hammering
+5. When a request finally succeeds, the backoff resets
+
+Set `retryOn429: false` in the config if you prefer 429 errors to surface to the user instead of being silently retried.
 
 ### Sliding window algorithm
 
@@ -155,17 +159,22 @@ The sliding window maintains a FIFO queue of `{ timestamp, tokens }` entries. Be
 6. If TPM + estimated input tokens ≥ limit → delay until enough tokens expire
 7. Apply backoff delay if there were consecutive errors
 
-## Rate limit detection patterns
+## Rate limit detection
 
-The plugin detects rate-limit errors by matching these patterns in the error:
+The plugin detects HTTP 429 responses by checking the following in the error:
 
-| Pattern | Example |
+| Signal | Example |
 |---------|---------|
-| HTTP status code | `429`, `RATE_LIMITED` |
+| HTTP status code | `statusCode: 429` |
+| Error code | `429`, `RATE_LIMITED`, `QUOTA` |
 | "rate limit" text | `rate limit exceeded`, `rate_limit` |
 | "too many requests" | `too many requests, please try again later` |
 | TPM/RPM tokens | `TPM limit reached`, `token limit exceeded` |
 | "throttle" | `request throttled`, `throttling` |
+| "quota" | `Allocated quota exceeded` (Bailian) |
+| "429" in message | `429: {...}` |
+
+When any of these match, the plugin retries transparently with adaptive backoff by default (`retryOn429: true`).
 
 ## Architecture
 

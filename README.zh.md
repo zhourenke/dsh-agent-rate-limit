@@ -98,7 +98,7 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 预期输出：
 
 ```
-[agent-rate-limit] Plugin loaded. TPM: 1200000, RPM: 15000, factor: 0.8, window: 60000ms
+[agent-rate-limit] Plugin loaded. TPM: 1200000, RPM: 15000, factor: 0.8, window: 60000ms, retryOn429: true
 ```
 
 ## 配置
@@ -109,7 +109,8 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 | `tpmLimit` | `1200000` | TPM（每分钟令牌数）限制。默认值匹配阿里云百炼 deepseek-v4-flash。 |
 | `rpmLimit` | `15000` | RPM（每分钟请求数）限制。 |
 | `safetyFactor` | `0.8` | 安全系数（0.8 = 使用 80% 的限额，留 20% 缓冲）。 |
-| `maxBackoffMs` | `30000` | 最大指数退避延迟（毫秒，30 秒）。 |
+| `maxBackoffMs` | `30000` | 最大退避延迟（毫秒，30 秒）。 |
+| `retryOn429` | `true` | 为 `true`（默认）时，HTTP 429 响应被静默重试（自适应退避），对话全程丝滑。设为 `false` 则 429 错误会报给用户。 |
 
 ### 示例：针对不同供应商调整
 
@@ -121,6 +122,7 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
     tpmLimit: 2000000     # 对于其他供应商，2M TPM
     rpmLimit: 5000        # 5K RPM
     safetyFactor: 0.75    # 75% 利用率，25% 缓冲
+    retryOn429: true      # 静默重试 429（推荐）
 ```
 
 ## 速率限制的工作原理
@@ -135,13 +137,15 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 
 ### 错误恢复
 
-检测到速率限制错误时（HTTP 429，或错误文本包含"rate limit"、"too many requests"等），本插件：
+检测到速率限制错误时（HTTP 429，阿里云百炼等供应商在 TPM 或 RPM 超限时的典型响应），本插件：
 
-1. 记录错误到连续错误计数器
-2. 返回 `{ kind: 'retry' }` 告诉 Agent 循环重试
-3. 应用**指数退避**：1s、2s、4s、8s、...（上限为 `maxBackoffMs`）
-4. **降低有效 TPM 限制**，每次连续错误降低 10%（最低为原始值的 30%）
-5. 请求成功时重置计数器
+1. 记录错误时间戳用于自适应退避计算
+2. 返回 `{ kind: 'retry' }` 告诉 Agent 循环**透明地重试**——用户完全看不到错误
+3. 应用**基于时间的自适应退避**：延迟时间与距上次错误的时间成反比（刚出错时约 4s，60s 后归零）
+4. 如果错误持续，退避使重试频率保持在低位，避免进一步冲击 API
+5. 请求成功时退避自动重置
+
+若你想让 429 错误报给用户而不是静默重试，可将配置项 `retryOn429` 设为 `false`。
 
 ### 滑动窗口算法
 
@@ -155,17 +159,22 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 6. 如果 TPM + 估算输入令牌 ≥ 限制 → 延迟直到足够令牌过期
 7. 如果有连续错误，应用退避延迟
 
-## 速率限制检测模式
+## 速率限制检测
 
-本插件通过匹配错误中的以下模式来检测速率限制错误：
+本插件通过检查错误中的以下信号来检测 HTTP 429 响应：
 
-| 模式 | 示例 |
+| 信号 | 示例 |
 |------|------|
-| HTTP 状态码 | `429`, `RATE_LIMITED` |
+| HTTP 状态码 | `statusCode: 429` |
+| 错误码 | `429`, `RATE_LIMITED`, `QUOTA` |
 | "rate limit" 文本 | `rate limit exceeded`, `rate_limit` |
 | "too many requests" | `too many requests, please try again later` |
 | TPM/RPM 令牌 | `TPM limit reached`, `token limit exceeded` |
 | "throttle" | `request throttled`, `throttling` |
+| "quota" | `Allocated quota exceeded`（百炼） |
+| 消息中的 "429" | `429: {...}` |
+
+匹配到任一信号时，插件默认（`retryOn429: true`）会以自适应退避透明地重试。
 
 ## 架构
 
