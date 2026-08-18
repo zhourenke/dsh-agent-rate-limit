@@ -1,0 +1,6 @@
+# The dsh-agent-rate-limit bundle patch: adds an agent loop rate limiter
+# to prevent TPM/RPM limit violations by intercepting the LLM streaming
+# pipeline and adding adaptive delays between requests.
+- insert:
+    - id: agent-rate-limit
+      name: '@deepseek-ai/dsh-agent-rate-limit'

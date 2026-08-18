@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+lib/types/
+.DS_Store
+Thumbs.db
+*.log
