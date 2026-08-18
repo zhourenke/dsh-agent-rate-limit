@@ -275,13 +275,15 @@ const Config = z.object({
  */
 async function apply(ctx: Record<string, unknown>, config: Record<string, unknown>): Promise<void> {
   // Initialize rate limiter state
-  initRateLimiter({
+  const cfg = {
     windowMs: Number(config.windowMs ?? DEFAULT_WINDOW_MS),
     tpmLimit: Number(config.tpmLimit ?? DEFAULT_TPM_LIMIT),
     rpmLimit: Number(config.rpmLimit ?? DEFAULT_RPM_LIMIT),
     safetyFactor: Number(config.safetyFactor ?? DEFAULT_SAFETY_FACTOR),
     maxBackoffMs: Number(config.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS),
-  })
+  }
+  initRateLimiter(cfg)
+  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms`)
 
   const timer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
@@ -307,6 +309,9 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       // Calculate and apply delay before the first chunk
       const delay = calculateDelay(estimatedInputTokens, now)
       if (delay > 0) {
+        const currentTpm = sumWindow(now)
+        const effectiveLimit = getEffectiveTpmLimit()
+        console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)}, RPM: ${windowEntries.length}/${rpmLimit}, errors: ${consecutiveErrors})`)
         await timer.timer.timeout(delay)
       }
 
@@ -350,6 +355,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
 
     if (isRateLimit) {
       recordError()
+      console.log(`[agent-rate-limit] Rate limit error #${consecutiveErrors} detected (${errorCode}: ${errorMessage.slice(0, 80)}). Backoff: ${getBackoffDelay()}ms`)
       return { kind: 'retry' }
     }
 
