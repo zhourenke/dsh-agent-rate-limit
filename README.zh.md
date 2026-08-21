@@ -111,6 +111,7 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 | `safetyFactor` | `0.8` | 安全系数（0.8 = 使用 80% 的限额，留 20% 缓冲）。 |
 | `maxBackoffMs` | `30000` | 最大退避延迟（毫秒，30 秒）。 |
 | `retryOn429` | `true` | 为 `true`（默认）时，HTTP 429 响应被静默重试（自适应退避），对话全程丝滑。设为 `false` 则 429 错误会报给用户。 |
+| `maxRetries` | `5` | 每次突发中最多连续重试 429 的次数，超过后放弃重试并把错误报给用户。防止永久性错误（如账户配额真正耗尽）导致无限重试循环。 |
 
 ### 示例：针对不同供应商调整
 
@@ -123,6 +124,7 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
     rpmLimit: 5000        # 5K RPM
     safetyFactor: 0.75    # 75% 利用率，25% 缓冲
     retryOn429: true      # 静默重试 429（推荐）
+    maxRetries: 5         # 连续 5 次 429 后放弃
 ```
 
 ## 速率限制的工作原理
@@ -139,11 +141,11 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 
 检测到速率限制错误时（HTTP 429，阿里云百炼等供应商在 TPM 或 RPM 超限时的典型响应），本插件：
 
-1. 记录错误时间戳用于自适应退避计算
+1. 记录错误并递增当前突发的重试计数
 2. 返回 `{ kind: 'retry' }` 告诉 Agent 循环**透明地重试**——用户完全看不到错误
-3. 应用**基于时间的自适应退避**：延迟时间与距上次错误的时间成反比（刚出错时约 4s，60s 后归零）
-4. 如果错误持续，退避使重试频率保持在低位，避免进一步冲击 API
-5. 请求成功时退避自动重置
+3. 应用**递增退避**：2s → 4s → 8s → 16s → 30s（上限 `maxBackoffMs`），每次重试都降低对 API 的压力
+4. **连续失败 `maxRetries` 次后放弃重试**（默认 5 次），把错误报给用户。这防止了永久性错误导致无限重试循环——例如账户配额真正耗尽（`"Allocated quota exceeded, please increase your quota limit"`）
+5. 请求成功时重试计数自动重置
 
 若你想让 429 错误报给用户而不是静默重试，可将配置项 `retryOn429` 设为 `false`。
 

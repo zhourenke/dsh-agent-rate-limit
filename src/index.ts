@@ -32,6 +32,9 @@ const DEFAULT_SAFETY_FACTOR = 0.8
 /** Default: silently retry 429 errors (true) or surface them to the user (false). */
 const DEFAULT_RETRY_ON_429 = true
 
+/** Default maximum consecutive 429 retries per burst before giving up. */
+const DEFAULT_MAX_RETRIES = 5
+
 /** Default maximum exponential backoff delay in milliseconds. */
 const DEFAULT_MAX_BACKOFF_MS = 30_000
 
@@ -59,12 +62,16 @@ let lastRateLimitErrorAt = 0
 /** @internal Whether to silently retry on 429 errors. */
 let retryOn429 = DEFAULT_RETRY_ON_429
 
+/** @internal Consecutive 429 retry count in the current burst. */
+let retryCount = 0
+
 /** @internal Resolved config. */
 let windowMs = DEFAULT_WINDOW_MS
 let tpmLimit = DEFAULT_TPM_LIMIT
 let rpmLimit = DEFAULT_RPM_LIMIT
 let safetyFactor = DEFAULT_SAFETY_FACTOR
 let maxBackoffMs = DEFAULT_MAX_BACKOFF_MS
+let maxRetries = DEFAULT_MAX_RETRIES
 
 /**
  * Initialize the rate limiter with the given config.
@@ -77,6 +84,7 @@ function initRateLimiter(config: {
   safetyFactor: number
   maxBackoffMs: number
   retryOn429: boolean
+  maxRetries: number
 }): void {
   windowMs = config.windowMs
   tpmLimit = config.tpmLimit
@@ -84,9 +92,11 @@ function initRateLimiter(config: {
   safetyFactor = config.safetyFactor
   maxBackoffMs = config.maxBackoffMs
   retryOn429 = config.retryOn429
+  maxRetries = config.maxRetries
   windowEntries.length = 0
   consecutiveErrors = 0
   lastRateLimitErrorAt = 0
+  retryCount = 0
 }
 
 /**
@@ -125,13 +135,11 @@ function addToWindow(tokens: number, now: number): void {
 
 /**
  * Record a rate-limit error for backoff calculation.
- * Only updates the timestamp if enough time has passed since the last
- * error (10s), preventing the backoff from being reset on every retry
- * within a rapid burst of 429 responses.
  * @internal
  */
 function recordError(): void {
   consecutiveErrors++
+  retryCount++
   const now = Date.now()
   if (now - lastRateLimitErrorAt > 10_000) {
     lastRateLimitErrorAt = now
@@ -139,30 +147,24 @@ function recordError(): void {
 }
 
 /**
- * Reset the consecutive error counter.
+ * Reset the consecutive error counter and retry budget.
  * @internal
  */
 function resetErrors(): void {
   consecutiveErrors = 0
+  retryCount = 0
   // Keep lastRateLimitErrorAt so the backoff still decays gradually
 }
 
 /**
- * Calculate the adaptive backoff delay based on recent errors.
- * Uses a time-window approach: if a rate-limit error happened within the
- * last 60 seconds, scale the delay by how recent it was.
+ * Calculate the adaptive backoff delay based on the retry count.
+ * Escalates with each retry: 2s, 4s, 8s, 16s, ... capped at maxBackoffMs.
  * @internal
  */
 function getBackoffDelay(): number {
-  if (lastRateLimitErrorAt === 0) return 0
-  const msSinceError = Date.now() - lastRateLimitErrorAt
-  // If the last error was over 60s ago, no backoff
-  if (msSinceError > 60_000) return 0
-  // Scale delay: 1s at t=0, 2s at t=-30s, 4s at t=-45s, 8s at t=-52.5s...
-  // Formula: 1000 * 2^(1 - msSinceError/30000) → 1s to 32s, capped
-  const exponent = 1 - msSinceError / 30_000
+  if (retryCount === 0) return 0
   const delay = Math.min(
-    Math.pow(2, Math.max(0, exponent)) * 1000,
+    Math.pow(2, Math.min(retryCount, 5)) * 1000,
     maxBackoffMs,
   )
   return Math.round(delay)
@@ -295,6 +297,7 @@ const Config = z.object({
   safetyFactor: z.number().default(DEFAULT_SAFETY_FACTOR),
   maxBackoffMs: z.number().default(DEFAULT_MAX_BACKOFF_MS),
   retryOn429: z.boolean().default(DEFAULT_RETRY_ON_429),
+  maxRetries: z.number().default(DEFAULT_MAX_RETRIES),
 })
 
 /**
@@ -315,9 +318,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     safetyFactor: Number(config.safetyFactor ?? DEFAULT_SAFETY_FACTOR),
     maxBackoffMs: Number(config.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS),
     retryOn429: config.retryOn429 !== false,
+    maxRetries: Number(config.maxRetries ?? DEFAULT_MAX_RETRIES),
   }
   initRateLimiter(cfg)
-  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}`)
+  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}, maxRetries: ${cfg.maxRetries}`)
 
   const timer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
@@ -345,8 +349,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       if (delay > 0) {
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
-        const sinceError = lastRateLimitErrorAt > 0 ? Math.round((Date.now() - lastRateLimitErrorAt) / 1000) : 0
-        console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)}, RPM: ${windowEntries.length}/${rpmLimit}, lastError: ${sinceError}s ago)`)
+        console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)}, RPM: ${windowEntries.length}/${rpmLimit}, retries: ${retryCount}/${maxRetries})`)
         await timer.timer.timeout(delay)
       }
 
@@ -400,9 +403,16 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
 
     if (is429) {
       if (retryOn429) {
+        // Enforce the retry budget: give up after maxRetries consecutive failures
+        // so a permanent error (e.g. account quota exhausted) does not loop forever.
+        if (retryCount >= maxRetries) {
+          resetErrors()
+          console.log(`[agent-rate-limit] ❌ 429 persists after ${maxRetries} retries, giving up — surfacing error to user (${errorCode}: ${errorMessage.slice(0, 120)})`)
+          return next()
+        }
         recordError()
         const backoff = getBackoffDelay()
-        console.log(`[agent-rate-limit] 429 detected, retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
+        console.log(`[agent-rate-limit] 429 detected (retry ${retryCount}/${maxRetries}), retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
         return { kind: 'retry' }
       } else {
         console.log(`[agent-rate-limit] 429 detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
@@ -422,5 +432,6 @@ export {
   DEFAULT_RPM_LIMIT,
   DEFAULT_SAFETY_FACTOR,
   DEFAULT_RETRY_ON_429,
+  DEFAULT_MAX_RETRIES,
   DEFAULT_MAX_BACKOFF_MS,
 }

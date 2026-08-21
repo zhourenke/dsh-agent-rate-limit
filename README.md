@@ -111,6 +111,7 @@ Expected output:
 | `safetyFactor` | `0.8` | Safety factor (0.8 = use 80% of the limit, leaving 20% buffer). |
 | `maxBackoffMs` | `30000` | Maximum backoff delay in milliseconds (30s). |
 | `retryOn429` | `true` | When `true` (default), HTTP 429 responses are silently retried with adaptive backoff — the conversation continues smoothly. Set to `false` to surface 429 errors to the user. |
+| `maxRetries` | `5` | Maximum consecutive 429 retries per burst before giving up and surfacing the error to the user. Prevents an infinite retry loop when the error is permanent (e.g. account quota genuinely exhausted). |
 
 ### Example: Adjusting for different providers
 
@@ -123,6 +124,7 @@ Expected output:
     rpmLimit: 5000        # 5K RPM
     safetyFactor: 0.75    # 75% utilization, 25% buffer
     retryOn429: true      # silently retry on 429 (recommended)
+    maxRetries: 5         # give up after 5 consecutive 429s
 ```
 
 ## How the rate limiting works
@@ -139,11 +141,11 @@ This is intentionally conservative — it's better to delay slightly more than t
 
 When a rate-limit error is detected (HTTP 429, the typical response from providers like Alibaba Cloud Bailian when TPM or RPM limits are hit), the plugin:
 
-1. Records the error timestamp for adaptive backoff calculation
+1. Records the error and increments the retry count for the current burst
 2. Returns `{ kind: 'retry' }` to tell the agent loop to retry **transparently** — the user never sees the error
-3. Applies **time-based adaptive backoff**: the delay is proportional to how recently the last error occurred (4s immediately after an error, decaying to 0 over 60s)
-4. If the error persists, the backoff keeps the retry rate low, avoiding further API hammering
-5. When a request finally succeeds, the backoff resets
+3. Applies **escalating backoff**: 2s → 4s → 8s → 16s → 30s (capped at `maxBackoffMs`), reducing the pressure on the API with each retry
+4. **Gives up after `maxRetries` consecutive failures** (default 5): the error is then surfaced to the user. This prevents an infinite retry loop when the 429 is permanent — e.g. the account's allocated quota is genuinely exhausted (`"Allocated quota exceeded, please increase your quota limit"`)
+5. When a request finally succeeds, the retry counter resets
 
 Set `retryOn429: false` in the config if you prefer 429 errors to surface to the user instead of being silently retried.
 
