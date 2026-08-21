@@ -355,17 +355,40 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
 
       // Stream chunks and count output tokens
       let outputTokens = 0
+      let hadFailure = false
       for await (const chunk of originalStream) {
-        const chunkObj = chunk as { delta?: string }
-        if (typeof chunkObj.delta === 'string') {
-          outputTokens += estimateTokensFromDelta(chunkObj.delta)
+        const chunkObj = chunk as {
+          type?: string
+          text?: string
+          argumentsDelta?: string
+          reason?: { kind?: string }
+        }
+        // Count output tokens from text/reasoning/tool-call deltas
+        if (chunkObj.type === 'text-delta' && typeof chunkObj.text === 'string') {
+          outputTokens += estimateTokensFromDelta(chunkObj.text)
+        } else if (chunkObj.type === 'reasoning-delta' && typeof chunkObj.text === 'string') {
+          outputTokens += estimateTokensFromDelta(chunkObj.text)
+        } else if (chunkObj.type === 'tool-call-delta' && typeof chunkObj.argumentsDelta === 'string') {
+          outputTokens += estimateTokensFromDelta(chunkObj.argumentsDelta)
+        }
+        // Detect terminal error/aborted finish chunks — the LLM adapter signals
+        // failures (e.g. HTTP 429) as finish chunks, NOT by throwing. Without
+        // this check, the for-await loop completes normally, and the code
+        // below would incorrectly record tokens and reset the retry budget.
+        if (chunkObj.type === 'finish' && chunkObj.reason) {
+          const reasonKind = chunkObj.reason.kind
+          if (reasonKind === 'error' || reasonKind === 'aborted') {
+            hadFailure = true
+          }
         }
         yield chunk
       }
 
-      // Record actual token usage after the stream completes
-      addToWindow(estimatedInputTokens + outputTokens, Date.now())
-      resetErrors()
+      // Only record usage and reset retry budget on successful completion
+      if (!hadFailure) {
+        addToWindow(estimatedInputTokens + outputTokens, Date.now())
+        resetErrors()
+      }
     })()
 
     return wrappedStream
