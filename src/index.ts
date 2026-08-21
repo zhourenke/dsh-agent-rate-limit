@@ -353,17 +353,25 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         await timer.timer.timeout(delay)
       }
 
-      // Stream chunks and count output tokens
+      // Stream chunks, capture actual API token usage, and detect failures
       let outputTokens = 0
       let hadFailure = false
+      let actualInputTokens = 0
+      let actualOutputTokens = 0
       for await (const chunk of originalStream) {
         const chunkObj = chunk as {
           type?: string
           text?: string
           argumentsDelta?: string
+          usage?: { inputTokens: number; outputTokens: number }
           reason?: { kind?: string }
         }
-        // Count output tokens from text/reasoning/tool-call deltas
+        // Capture the actual token usage from the API's usage chunk
+        if (chunkObj.type === 'usage' && chunkObj.usage) {
+          actualInputTokens = chunkObj.usage.inputTokens
+          actualOutputTokens = chunkObj.usage.outputTokens
+        }
+        // Count output tokens from text/reasoning/tool-call deltas (fallback)
         if (chunkObj.type === 'text-delta' && typeof chunkObj.text === 'string') {
           outputTokens += estimateTokensFromDelta(chunkObj.text)
         } else if (chunkObj.type === 'reasoning-delta' && typeof chunkObj.text === 'string') {
@@ -386,7 +394,13 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
 
       // Only record usage and reset retry budget on successful completion
       if (!hadFailure) {
-        addToWindow(estimatedInputTokens + outputTokens, Date.now())
+        // Use the API's actual token counts when available (far more accurate
+        // than heuristic estimation), otherwise fall back to the heuristic sum.
+        const totalTokens = actualInputTokens > 0
+          ? actualInputTokens + actualOutputTokens
+          : estimatedInputTokens + outputTokens
+        addToWindow(totalTokens, Date.now())
+        console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (actual: ${actualInputTokens}i + ${actualOutputTokens}o, est: ${estimatedInputTokens}i + ${outputTokens}o)`)
         resetErrors()
       }
     })()
