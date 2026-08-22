@@ -65,6 +65,9 @@ let retryOn429 = DEFAULT_RETRY_ON_429
 /** @internal Consecutive 429 retry count in the current burst. */
 let retryCount = 0
 
+/** @internal Last actual input token count from the API usage chunk (0 = unknown). */
+let lastActualInputTokens = 0
+
 /** @internal Resolved config. */
 let windowMs = DEFAULT_WINDOW_MS
 let tpmLimit = DEFAULT_TPM_LIMIT
@@ -97,6 +100,7 @@ function initRateLimiter(config: {
   consecutiveErrors = 0
   lastRateLimitErrorAt = 0
   retryCount = 0
+  lastActualInputTokens = 0
 }
 
 /**
@@ -258,14 +262,40 @@ function estimateTokens(text: string): number {
 }
 
 /**
- * Estimate tokens from an array of messages (each with a `content` field).
+ * Extract text content from a ContentBlock recursively.
+ * DSH messages carry content as ContentBlock[] (never a plain string).
  * @internal
  */
-function estimateTokensFromMessages(messages: Array<{ content?: string }>): number {
+function extractBlockText(block: { type?: string; text?: string; arguments?: string; content?: unknown[] }): string {
+  if (block.type === 'text' || block.type === 'reasoning') {
+    return block.text ?? ''
+  }
+  if (block.type === 'tool-call') {
+    return block.arguments ?? ''
+  }
+  if (block.type === 'tool-result' && Array.isArray(block.content)) {
+    let text = ''
+    for (const child of block.content) {
+      text += extractBlockText(child as { type?: string; text?: string; arguments?: string; content?: unknown[] })
+    }
+    return text
+  }
+  return ''
+}
+
+/**
+ * Estimate tokens from an array of DSH messages.
+ * DSH Message.content is always ContentBlock[], never a plain string.
+ * @internal
+ */
+function estimateTokensFromMessages(messages: Array<{ content?: unknown[] }>): number {
   let total = 0
   for (const msg of messages) {
-    if (typeof msg.content === 'string') {
-      total += estimateTokens(msg.content)
+    const blocks = msg.content
+    if (Array.isArray(blocks)) {
+      for (const block of blocks) {
+        total += estimateTokens(extractBlockText(block as { type?: string; text?: string; arguments?: string; content?: unknown[] }))
+      }
     }
   }
   return total
@@ -340,9 +370,17 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     // and counts output tokens
     const wrappedStream = (async function* (): AsyncIterable<unknown> {
       const now = Date.now()
-      const opts = options as { messages?: Array<{ content?: string }> }
+      const opts = options as { messages?: Array<{ content?: unknown[] }> }
       const messages = opts.messages ?? []
-      const estimatedInputTokens = estimateTokensFromMessages(messages)
+
+      // Use the last actual input token count from the API as the estimate
+      // for this request — it's far more accurate than heuristic estimation
+      // because the conversation context grows monotonically, so the previous
+      // request's input count is an excellent proxy for the current one.
+      // Fall back to heuristic estimation only for the very first request.
+      const estimatedInputTokens = lastActualInputTokens > 0
+        ? lastActualInputTokens
+        : estimateTokensFromMessages(messages)
 
       // Calculate and apply delay before the first chunk
       const delay = calculateDelay(estimatedInputTokens, now)
@@ -401,6 +439,11 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           : estimatedInputTokens + outputTokens
         addToWindow(totalTokens, Date.now())
         console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (actual: ${actualInputTokens}i + ${actualOutputTokens}o, est: ${estimatedInputTokens}i + ${outputTokens}o)`)
+        // Store the actual input count so the next request can use it
+        // as a much more accurate estimate than heuristic calculation.
+        if (actualInputTokens > 0) {
+          lastActualInputTokens = actualInputTokens
+        }
         resetErrors()
       }
     })()
