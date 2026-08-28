@@ -538,7 +538,6 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           const currentTpm = sumWindow(now)
           const effectiveLimit = getEffectiveTpmLimit()
           const lines = [
-            '━━━ agent-rate-limit ━━━',
             `Status: loaded`,
             `Config:`,
             `  TPM limit:     ${tpmLimit.toLocaleString()} (effective: ${Math.round(effectiveLimit).toLocaleString()})`,
