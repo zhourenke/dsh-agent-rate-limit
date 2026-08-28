@@ -65,8 +65,19 @@ let retryOn429 = DEFAULT_RETRY_ON_429
 /** @internal Consecutive 429 retry count in the current burst. */
 let retryCount = 0
 
-/** @internal Last actual input token count from the API usage chunk (0 = unknown). */
-let lastActualInputTokens = 0
+/** @internal Recent actual input token counts from the API usage chunk (max 3 entries). */
+const recentInputTokens: number[] = []
+
+/**
+ * Get the average of recent actual input token counts.
+ * Returns 0 if no recent data is available.
+ * @internal
+ */
+function getAverageInputTokens(): number {
+  if (recentInputTokens.length === 0) return 0
+  const sum = recentInputTokens.reduce((a, b) => a + b, 0)
+  return Math.round(sum / recentInputTokens.length)
+}
 
 /** @internal Resolved config. */
 let windowMs = DEFAULT_WINDOW_MS
@@ -100,7 +111,7 @@ function initRateLimiter(config: {
   consecutiveErrors = 0
   lastRateLimitErrorAt = 0
   retryCount = 0
-  lastActualInputTokens = 0
+  recentInputTokens.length = 0
 }
 
 /**
@@ -373,14 +384,11 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       const opts = options as { messages?: Array<{ content?: unknown[] }> }
       const messages = opts.messages ?? []
 
-      // Use the last actual input token count from the API as the estimate
-      // for this request — it's far more accurate than heuristic estimation
-      // because the conversation context grows monotonically, so the previous
-      // request's input count is an excellent proxy for the current one.
+      // Use the average of recent actual input token counts from the API as the
+      // estimate for this request — far more accurate than heuristic estimation.
+      // The moving average smooths out variance across concurrent requests.
       // Fall back to heuristic estimation only for the very first request.
-      const estimatedInputTokens = lastActualInputTokens > 0
-        ? lastActualInputTokens
-        : estimateTokensFromMessages(messages)
+      const estimatedInputTokens = getAverageInputTokens() || estimateTokensFromMessages(messages)
 
       // Calculate and apply delay before the first chunk
       const delay = calculateDelay(estimatedInputTokens, now)
@@ -438,11 +446,15 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           ? actualInputTokens + actualOutputTokens
           : estimatedInputTokens + outputTokens
         addToWindow(totalTokens, Date.now())
-        console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (actual: ${actualInputTokens}i + ${actualOutputTokens}o, est: ${estimatedInputTokens}i + ${outputTokens}o)`)
+        console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${actualInputTokens}i + ${actualOutputTokens}o)`)
         // Store the actual input count so the next request can use it
         // as a much more accurate estimate than heuristic calculation.
+        // Keep a sliding window of the last 3 values for a stable moving average.
         if (actualInputTokens > 0) {
-          lastActualInputTokens = actualInputTokens
+          recentInputTokens.push(actualInputTokens)
+          if (recentInputTokens.length > 3) {
+            recentInputTokens.shift()
+          }
         }
         resetErrors()
       }
