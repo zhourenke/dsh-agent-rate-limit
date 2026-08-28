@@ -370,7 +370,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     verbose: config.verbose === true,
   }
   initRateLimiter(cfg)
-  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}, maxRetries: ${cfg.maxRetries}, verbose: ${cfg.verbose}`)
+  if (verbose) console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}, maxRetries: ${cfg.maxRetries}, verbose: ${cfg.verbose}`)
 
   const timer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
@@ -507,7 +507,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         // so a permanent error (e.g. account quota exhausted) does not loop forever.
         if (retryCount >= maxRetries) {
           resetErrors()
-          console.log(`[agent-rate-limit] ❌ 429 persists after ${maxRetries} retries, giving up — surfacing error to user (${errorCode}: ${errorMessage.slice(0, 120)})`)
+          if (verbose) console.log(`[agent-rate-limit] ❌ 429 persists after ${maxRetries} retries, giving up — surfacing error to user (${errorCode}: ${errorMessage.slice(0, 120)})`)
           return next()
         }
         recordError()
@@ -515,7 +515,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         if (verbose) console.log(`[agent-rate-limit] 429 detected (retry ${retryCount}/${maxRetries}), retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
         return { kind: 'retry' }
       } else {
-        console.log(`[agent-rate-limit] 429 detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
+        if (verbose) console.log(`[agent-rate-limit] 429 detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
         return next()
       }
     }
@@ -523,6 +523,40 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     // For non-429 errors, delegate to the default handler
     return next()
   })
+
+  // Register /agent-rate-limit command (optional — only if commands service is available)
+  const commands = ctx.get('commands') as undefined | { register: (def: { name: string; description: string; handler: (invocation: { agent?: { ctx: Record<string, unknown> } }) => { kind: string; text?: string } }) => () => void }
+  if (commands) {
+    commands.register({
+      name: 'agent-rate-limit',
+      description: 'Show agent-rate-limit plugin status and configuration.',
+      handler: () => {
+        const now = Date.now()
+        pruneWindow(now)
+        const currentTpm = sumWindow(now)
+        const effectiveLimit = getEffectiveTpmLimit()
+        const lines = [
+          '━━━ agent-rate-limit ━━━',
+          `Status: loaded`,
+          `Config:`,
+          `  TPM limit:     ${tpmLimit.toLocaleString()} (effective: ${Math.round(effectiveLimit).toLocaleString()})`,
+          `  RPM limit:     ${rpmLimit.toLocaleString()}`,
+          `  Safety factor: ${safetyFactor}`,
+          `  Window:        ${windowMs / 1000}s`,
+          `  Retry on 429:  ${retryOn429}`,
+          `  Max retries:   ${maxRetries}`,
+          `  Verbose:       ${verbose}`,
+          `Current:`,
+          `  Window entries:  ${windowEntries.length}`,
+          `  Current TPM:     ${currentTpm.toLocaleString()}`,
+          `  Consecutive err: ${consecutiveErrors}`,
+          `  Retry count:     ${retryCount}`,
+          '━━━━━━━━━━━━━━━━━━━━━━',
+        ]
+        return { kind: 'success', text: lines.join('\n') }
+      },
+    })
+  }
 }
 
 export { apply, Config, inject, name }
