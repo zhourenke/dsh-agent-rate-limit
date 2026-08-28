@@ -112,6 +112,7 @@ dsh web 2>&1 | Select-String "agent-rate-limit"
 | `maxBackoffMs` | `30000` | 最大退避延迟（毫秒，30 秒）。 |
 | `retryOn429` | `true` | 为 `true`（默认）时，HTTP 429 响应被静默重试（自适应退避），对话全程丝滑。设为 `false` 则 429 错误会报给用户。 |
 | `maxRetries` | `5` | 每次突发中最多连续重试 429 的次数，超过后放弃重试并把错误报给用户。防止永久性错误（如账户配额真正耗尽）导致无限重试循环。 |
+| `verbose` | `false` | 为 `true` 时记录每次请求的详细日志（延迟、token 记录、重试尝试）。默认 `false`——仅记录启动和关键错误（如 maxRetries 次后放弃重试）。 |
 
 ### 示例：针对不同供应商调整
 

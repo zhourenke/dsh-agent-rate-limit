@@ -38,6 +38,9 @@ const DEFAULT_MAX_RETRIES = 5
 /** Default maximum exponential backoff delay in milliseconds. */
 const DEFAULT_MAX_BACKOFF_MS = 30_000
 
+/** Default: verbose logging (false = only log startup and critical errors). */
+const DEFAULT_VERBOSE = false
+
 // ---------------------------------------------------------------------------
 // Sliding window rate limiter
 // ---------------------------------------------------------------------------
@@ -86,6 +89,7 @@ let rpmLimit = DEFAULT_RPM_LIMIT
 let safetyFactor = DEFAULT_SAFETY_FACTOR
 let maxBackoffMs = DEFAULT_MAX_BACKOFF_MS
 let maxRetries = DEFAULT_MAX_RETRIES
+let verbose = DEFAULT_VERBOSE
 
 /**
  * Initialize the rate limiter with the given config.
@@ -99,6 +103,7 @@ function initRateLimiter(config: {
   maxBackoffMs: number
   retryOn429: boolean
   maxRetries: number
+  verbose: boolean
 }): void {
   windowMs = config.windowMs
   tpmLimit = config.tpmLimit
@@ -107,6 +112,7 @@ function initRateLimiter(config: {
   maxBackoffMs = config.maxBackoffMs
   retryOn429 = config.retryOn429
   maxRetries = config.maxRetries
+  verbose = config.verbose
   windowEntries.length = 0
   consecutiveErrors = 0
   lastRateLimitErrorAt = 0
@@ -339,6 +345,7 @@ const Config = z.object({
   maxBackoffMs: z.number().default(DEFAULT_MAX_BACKOFF_MS),
   retryOn429: z.boolean().default(DEFAULT_RETRY_ON_429),
   maxRetries: z.number().default(DEFAULT_MAX_RETRIES),
+  verbose: z.boolean().default(DEFAULT_VERBOSE),
 })
 
 /**
@@ -360,9 +367,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     maxBackoffMs: Number(config.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS),
     retryOn429: config.retryOn429 !== false,
     maxRetries: Number(config.maxRetries ?? DEFAULT_MAX_RETRIES),
+    verbose: config.verbose === true,
   }
   initRateLimiter(cfg)
-  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}, maxRetries: ${cfg.maxRetries}`)
+  console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}, maxRetries: ${cfg.maxRetries}, verbose: ${cfg.verbose}`)
 
   const timer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
@@ -395,7 +403,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       if (delay > 0) {
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
-        console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)}, RPM: ${windowEntries.length}/${rpmLimit}, retries: ${retryCount}/${maxRetries})`)
+        if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)}, RPM: ${windowEntries.length}/${rpmLimit}, retries: ${retryCount}/${maxRetries})`)
         await timer.timer.timeout(delay)
       }
 
@@ -446,7 +454,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           ? actualInputTokens + actualOutputTokens
           : estimatedInputTokens + outputTokens
         addToWindow(totalTokens, Date.now())
-        console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${actualInputTokens}i + ${actualOutputTokens}o)`)
+        if (verbose) console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${actualInputTokens}i + ${actualOutputTokens}o)`)
         // Store the actual input count so the next request can use it
         // as a much more accurate estimate than heuristic calculation.
         // Keep a sliding window of the last 3 values for a stable moving average.
@@ -504,7 +512,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         }
         recordError()
         const backoff = getBackoffDelay()
-        console.log(`[agent-rate-limit] 429 detected (retry ${retryCount}/${maxRetries}), retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
+        if (verbose) console.log(`[agent-rate-limit] 429 detected (retry ${retryCount}/${maxRetries}), retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
         return { kind: 'retry' }
       } else {
         console.log(`[agent-rate-limit] 429 detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
@@ -526,4 +534,5 @@ export {
   DEFAULT_RETRY_ON_429,
   DEFAULT_MAX_RETRIES,
   DEFAULT_MAX_BACKOFF_MS,
+  DEFAULT_VERBOSE,
 }

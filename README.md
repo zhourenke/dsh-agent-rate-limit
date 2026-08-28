@@ -112,6 +112,7 @@ Expected output:
 | `maxBackoffMs` | `30000` | Maximum backoff delay in milliseconds (30s). |
 | `retryOn429` | `true` | When `true` (default), HTTP 429 responses are silently retried with adaptive backoff — the conversation continues smoothly. Set to `false` to surface 429 errors to the user. |
 | `maxRetries` | `5` | Maximum consecutive 429 retries per burst before giving up and surfacing the error to the user. Prevents an infinite retry loop when the error is permanent (e.g. account quota genuinely exhausted). |
+| `verbose` | `false` | When `true`, logs per-request details (delay, token recording, retry attempts). Default `false` — only startup and critical errors (e.g. giving up after maxRetries) are logged. |
 
 ### Example: Adjusting for different providers
 
