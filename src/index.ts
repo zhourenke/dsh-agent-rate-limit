@@ -333,8 +333,8 @@ function estimateTokensFromDelta(delta: string): number {
 /** Cordis plugin name used by loader diagnostics. */
 const name = 'agent-rate-limit'
 
-/** Hard dependency on the timer service. */
-const inject = ['timer']
+/** Hard dependency on the timer service and commands service. */
+const inject = ['timer', 'commands']
 
 /** Plugin configuration schema. */
 const Config = z.object({
@@ -524,39 +524,42 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     return next()
   })
 
-  // Register /agent-rate-limit command (optional — only if commands service is available)
-  const commands = ctx.get('commands') as undefined | { register: (def: { name: string; description: string; handler: (invocation: { agent?: { ctx: Record<string, unknown> } }) => { kind: string; text?: string } }) => () => void }
-  if (commands) {
-    commands.register({
-      name: 'agent-rate-limit',
-      description: 'Show agent-rate-limit plugin status and configuration.',
-      handler: () => {
-        const now = Date.now()
-        pruneWindow(now)
-        const currentTpm = sumWindow(now)
-        const effectiveLimit = getEffectiveTpmLimit()
-        const lines = [
-          '━━━ agent-rate-limit ━━━',
-          `Status: loaded`,
-          `Config:`,
-          `  TPM limit:     ${tpmLimit.toLocaleString()} (effective: ${Math.round(effectiveLimit).toLocaleString()})`,
-          `  RPM limit:     ${rpmLimit.toLocaleString()}`,
-          `  Safety factor: ${safetyFactor}`,
-          `  Window:        ${windowMs / 1000}s`,
-          `  Retry on 429:  ${retryOn429}`,
-          `  Max retries:   ${maxRetries}`,
-          `  Verbose:       ${verbose}`,
-          `Current:`,
-          `  Window entries:  ${windowEntries.length}`,
-          `  Current TPM:     ${currentTpm.toLocaleString()}`,
-          `  Consecutive err: ${consecutiveErrors}`,
-          `  Retry count:     ${retryCount}`,
-          '━━━━━━━━━━━━━━━━━━━━━━',
-        ]
-        return { kind: 'success', text: lines.join('\n') }
-      },
-    })
-  }
+  // Register /agent-rate-limit command
+  const ctxAny = ctx as Record<string, unknown>
+  ctxAny.effect?.(() => {
+    const cmds = ctxAny.commands as { register: (def: { name: string; description: string; handler: () => { kind: string; text?: string } }) => () => void }
+    if (cmds) {
+      cmds.register({
+        name: 'agent-rate-limit',
+        description: 'Show agent-rate-limit plugin status and configuration.',
+        handler: () => {
+          const now = Date.now()
+          pruneWindow(now)
+          const currentTpm = sumWindow(now)
+          const effectiveLimit = getEffectiveTpmLimit()
+          const lines = [
+            '━━━ agent-rate-limit ━━━',
+            `Status: loaded`,
+            `Config:`,
+            `  TPM limit:     ${tpmLimit.toLocaleString()} (effective: ${Math.round(effectiveLimit).toLocaleString()})`,
+            `  RPM limit:     ${rpmLimit.toLocaleString()}`,
+            `  Safety factor: ${safetyFactor}`,
+            `  Window:        ${windowMs / 1000}s`,
+            `  Retry on 429:  ${retryOn429}`,
+            `  Max retries:   ${maxRetries}`,
+            `  Verbose:       ${verbose}`,
+            `Current:`,
+            `  Window entries:  ${windowEntries.length}`,
+            `  Current TPM:     ${currentTpm.toLocaleString()}`,
+            `  Consecutive err: ${consecutiveErrors}`,
+            `  Retry count:     ${retryCount}`,
+            '━━━━━━━━━━━━━━━━━━━━━━',
+          ]
+          return { kind: 'success', text: lines.join('\n') }
+        },
+      })
+    }
+  })
 }
 
 export { apply, Config, inject, name }
