@@ -1,70 +1,97 @@
 # @zhourenke/dsh-agent-rate-limit
 
-DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求间添加自适应延迟，防止 TPM（每分钟令牌数）和 RPM（每分钟请求数）超限。同时以递增退避重试 HTTP 429 响应。
+DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求间添加自适应延迟，防止 TPM/RPM 超限。自动重试 HTTP 429 和临时服务器过载（如 Nvidia `Service temporarily overloaded`），以递增退避恢复。
 
 ## 安装
 
-将包复制到 DSH 配置文件的 `node_modules`：
+插件以 DSH profile bundle 方式加载。在 `package.json` 的 `dsh.profile.bundles` 中加入：
 
-```powershell
-# 从仓库根目录
-Copy-Item -Recurse -Force .\dsh-agent-rate-limit $env:USERPROFILE\.dsh\profiles\web\node_modules\@zhourenke\dsh-agent-rate-limit
+```json
+"dsh": {
+  "profile": {
+    "bundles": [
+      "@zhourenke/dsh-agent-rate-limit"
+    ]
+  }
+}
 ```
 
-或使用目录联接（开发时自动同步）：
+然后安装：
 
 ```powershell
-New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\profiles\web\node_modules\@zhourenke\dsh-agent-rate-limit" -Target "C:\path\to\dsh-agent-rate-limit"
-```
-
-## 用法
-
-在 agent preset 中添加：
-
-```yaml
-- id: agent-rate-limit
-  name: '@zhourenke/dsh-agent-rate-limit'
+cd ~\.dsh\profiles\web
+pnpm add @zhourenke/dsh-agent-rate-limit
 ```
 
 ## 配置
 
-| 键 | 默认值 | 说明 |
-|-----|:------:|------|
+编辑插件自身的 `cordis.patch.yml`：
+
+```yaml
+# ~/.dsh/profiles/web/node_modules/@zhourenke/dsh-agent-rate-limit/cordis.patch.yml
+- insert:
+    - id: agent-rate-limit
+      name: '@zhourenke/dsh-agent-rate-limit'
+      config:
+        verbose: true   # 启用调试日志
+```
+
+> ⚠️ 不要修改 `~/.dsh/profiles/web/cordis.patch.yml`，否则会因 `duplicate loader entry id: agent-rate-limit` 报错。
+
+| 配置项 | 默认值 | 说明 |
+|-------|--------|------|
 | `windowMs` | `60000` | 滑动窗口大小（毫秒，60 秒）。 |
-| `tpmLimit` | `1200000` | TPM（每分钟令牌数）限制。默认值匹配阿里云百炼 deepseek-v4-flash。 |
-| `rpmLimit` | `15000` | RPM（每分钟请求数）限制。 |
-| `safetyFactor` | `0.8` | 安全系数（0.8 = 使用 80% 的限额，留 20% 缓冲）。 |
+| `tpmLimit` | `1200000` | TPM 限制。默认匹配阿里云百炼 deepseek-v4-flash。 |
+| `rpmLimit` | `15000` | RPM 限制。 |
+| `safetyFactor` | `0.8` | 安全系数（0.8 = 使用 80% 限额，预留 20% 缓冲）。 |
 | `maxBackoffMs` | `30000` | 最大退避延迟（毫秒，30 秒）。 |
-| `retryOn429` | `true` | 为 `true` 时，HTTP 429 响应被静默重试（递增退避）。 |
-| `maxRetries` | `5` | 每次突发中最多连续重试 429 的次数，超过后放弃。 |
-| `verbose` | `false` | 为 `true` 时记录每次请求的详细日志（延迟、token 记录、重试尝试）。 |
+| `retryOn429` | `true` | 启用后，可重试错误（429、服务器过载）将自动递增退避重试。 |
+| `maxRetries` | `5` | 连续重试上限，超过后放弃。 |
+| `verbose` | `false` | 启用后输出每次请求的延迟、令牌记录和重试信息。 |
 
 ## 查看状态
 
-在聊天输入框输入 `/agent-rate-limit` 查看当前插件状态和配置。
+在聊天输入框输入 `/agent-rate-limit`：
+
+```
+Status: loaded
+Config:
+  TPM limit:     1,200,000 (effective: 959,968)
+  RPM limit:     15,000
+  Safety factor: 0.8
+  Window:        60s
+  Retry on 429:  true
+  Max retries:   5
+  Verbose:       false
+Current:
+  Window entries:  12
+  Current TPM:     14,765
+  Consecutive err: 0
+  Retry count:     0
+```
 
 ## 工作原理
 
-### Token 追踪
+### 令牌追踪
 
-1. **Token 记录**：每次成功的模型调用后，从 API 的 `usage` chunk 中提取精确的 token 计数，比启发式估算准确得多。
-2. **滑动窗口**：60 秒 FIFO 队列追踪近期 token 消耗。每次请求前检查当前窗口是否接近 TPM 或 RPM 限制，按需延迟。
-3. **输入估算**：使用最近 3 次实际输入 token 数的平均值作为下次请求的估算值。仅首次请求回退到启发式估算（CJK：~1.5 字符/token，其他：~3.5 字符/token）。
+1. **记录令牌数**：每次成功调用后，插件从 API 的 `usage` 数据块中记录精确的令牌消耗。
+2. **滑动窗口**：60 秒 FIFO 队列记录最近令牌消耗。每次请求前检查窗口是否接近 TPM/RPM 上限，必要时延迟。
+3. **输入估算**：取最近 3 次 API 实际输入令牌数的平均值作为估算。仅首次请求使用启发式估算。
 
 ### 错误恢复
 
-检测到 HTTP 429 时：
+插件以递增退避（`2s → 4s → 8s → 16s → 30s`，上限 `maxBackoffMs`）重试以下错误：
 
-1. 递增当前突发重试计数
-2. 返回 `{ kind: 'retry' }` 透明重试
-3. 应用递增退避：2s → 4s → 8s → 16s → 30s（上限 `maxBackoffMs`）
-4. 连续失败 `maxRetries` 次后放弃重试并报错
-5. 成功时重置重试计数
+- **HTTP 429**（频率限制 / 配额超限）
+- **Nvidia `Service temporarily overloaded` / `PI_AI_ERROR`**（临时服务器过载）
+- 其他符合检测模式的临时性错误
 
-### 速率限制检测
+连续失败 `maxRetries` 次后放弃，将错误呈现给用户。成功调用后重置重试计数。
 
-通过检查错误中的 `statusCode`、`code` 和 `message` 检测 HTTP 429，匹配模式包括 `rate limit`、`too many requests`、`tpm`、`rpm`、`quota`、`throttl`、`429`。
+### 错误检测
 
-## 致谢
+插件通过检查错误的 `statusCode`、`code` 和 `message` 字段匹配以下模式：`rate limit`、`too many requests`、`tpm`、`rpm`、`quota`、`throttl`、`429`、`service temporarily overloaded`、`PI_AI_ERROR`。
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) 构建。
+## Credits
+
+Built for [DeepSeek Harness](https://github.com/deepseek-ai/dsh).
