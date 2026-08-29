@@ -4,5 +4,3 @@
 - insert:
     - id: agent-rate-limit
       name: '@zhourenke/dsh-agent-rate-limit'
-      config:
-        verbose: true
