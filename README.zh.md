@@ -1,3 +1,5 @@
+[**English**](README.en.md) | [**中文**](README.md)
+
 # @zhourenke/dsh-agent-rate-limit
 
 DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求间添加自适应延迟，防止 TPM/RPM 超限。自动重试 HTTP 429 和临时服务器过载（如 Nvidia `Service temporarily overloaded`），以递增退避恢复。
