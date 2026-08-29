@@ -4,23 +4,16 @@ DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求间添�
 
 ## 安装
 
-插件以 DSH profile bundle 方式加载。在 `package.json` 的 `dsh.profile.bundles` 中加入：
-
-```json
-"dsh": {
-  "profile": {
-    "bundles": [
-      "@zhourenke/dsh-agent-rate-limit"
-    ]
-  }
-}
+```powershell
+dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 ```
 
-然后安装：
+此命令从 GitHub 下载包，自动检测 `dsh.bundle` 声明并注册为 profile 层。重启 DSH 后生效。
+
+卸载：
 
 ```powershell
-cd ~\.dsh\profiles\web
-pnpm add @zhourenke/dsh-agent-rate-limit
+dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 ```
 
 ## 配置

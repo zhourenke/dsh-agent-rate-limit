@@ -4,23 +4,16 @@ A DSH agent loop rate limiter. Prevents TPM/RPM limit violations by adding adapt
 
 ## Installation
 
-The plugin is loaded as a DSH profile bundle. Add it to your profile's `dsh.profile.bundles` in `package.json`:
-
-```json
-"dsh": {
-  "profile": {
-    "bundles": [
-      "@zhourenke/dsh-agent-rate-limit"
-    ]
-  }
-}
+```powershell
+dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 ```
 
-Then install:
+This installs the package from GitHub, detects the `dsh.bundle` declaration, and automatically registers it as a profile layer. Restart DSH to activate.
+
+To uninstall:
 
 ```powershell
-cd ~\.dsh\profiles\web
-pnpm add @zhourenke/dsh-agent-rate-limit
+dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 ```
 
 ## Configuration

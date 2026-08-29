@@ -2,9 +2,6 @@
   "name": "@zhourenke/dsh-agent-rate-limit",
   "description": "Agent loop rate limiter — prevents TPM/RPM limit violations by intercepting the LLM streaming pipeline and adding adaptive delays between requests",
   "version": "0.1.0",
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zhourenke/dsh-agent-rate-limit.git"
