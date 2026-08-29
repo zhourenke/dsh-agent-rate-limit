@@ -472,12 +472,12 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
   })
 
   /**
-   * Intercept request errors to detect HTTP 429 (rate limit / quota) and retry.
+   * Intercept request errors to retry transient failures.
    *
-   * Bailian (and most LLM providers) use HTTP 429 to signal both TPM/RPM
-   * rate limits and temporary quota exhaustion. In both cases a short delay
-   * followed by a retry usually resolves the issue. Set `retryOn429: false`
-   * in the config if you want 429 errors to surface to the user instead.
+   * Detects HTTP 429 (rate limit / quota), as well as transient server
+   * overloads (e.g. Nvidia "Service temporarily overloaded"). These are
+   * typically resolved by a short delay and retry. Set `retryOn429: false`
+   * in the config to surface all retryable errors to the user instead.
    */
   ctx.on('agent/request-error', async (payload: unknown, next: () => Promise<{ kind: string }>) => {
     const p = payload as {
@@ -488,8 +488,11 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     const errorCode = typeof failure?.code === 'string' ? failure.code : ''
     const httpStatus = typeof failure?.statusCode === 'number' ? failure.statusCode : 0
 
-    // Detect HTTP 429: check statusCode, errorCode, and message text
-    const is429 =
+    // Detect retryable errors: HTTP 429 (rate limit / quota) and transient
+    // server overloads (e.g. Nvidia "Service temporarily overloaded").
+    // These are typically resolved by a short delay and retry.
+    const isRetryable =
+      // HTTP 429 / rate limit signals
       httpStatus === 429 ||
       errorCode === '429' ||
       errorCode === 'RATE_LIMITED' ||
@@ -499,23 +502,26 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       /tpm|rpm|token.*limit/i.test(errorMessage) ||
       /throttl/i.test(errorMessage) ||
       /quota/i.test(errorMessage) ||
-      /429/i.test(errorMessage)
+      /429/i.test(errorMessage) ||
+      // Transient server overloads (Nvidia, etc.)
+      /service temporarily overloaded/i.test(errorMessage) ||
+      /PI_AI_ERROR/i.test(errorMessage)
 
-    if (is429) {
+    if (isRetryable) {
       if (retryOn429) {
         // Enforce the retry budget: give up after maxRetries consecutive failures
-        // so a permanent error (e.g. account quota exhausted) does not loop forever.
+        // so a permanent error does not loop forever.
         if (retryCount >= maxRetries) {
           resetErrors()
-          if (verbose) console.log(`[agent-rate-limit] ❌ 429 persists after ${maxRetries} retries, giving up — surfacing error to user (${errorCode}: ${errorMessage.slice(0, 120)})`)
+          if (verbose) console.log(`[agent-rate-limit] ❌ Retryable error persists after ${maxRetries} retries, giving up — surfacing to user (${errorCode}: ${errorMessage.slice(0, 120)})`)
           return next()
         }
         recordError()
         const backoff = getBackoffDelay()
-        if (verbose) console.log(`[agent-rate-limit] 429 detected (retry ${retryCount}/${maxRetries}), retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
+        if (verbose) console.log(`[agent-rate-limit] Retryable error (retry ${retryCount}/${maxRetries}), retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
         return { kind: 'retry' }
       } else {
-        if (verbose) console.log(`[agent-rate-limit] 429 detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
+        if (verbose) console.log(`[agent-rate-limit] Retryable error detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
         return next()
       }
     }
