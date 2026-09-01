@@ -20,18 +20,15 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 
 ## Configuration
 
-Edit the plugin's `cordis.patch.yml`:
+Edit the `cordis.patch.yml`:
 
 ```yaml
-# ~/.dsh/profiles/web/node_modules/@zhourenke/dsh-agent-rate-limit/cordis.patch.yml
-- insert:
-    - id: agent-rate-limit
-      name: '@zhourenke/dsh-agent-rate-limit'
-      config:
-        verbose: true   # enable debug logging
+# ~/.dsh/profiles/web/cordis.patch.yml
+- id: agent-rate-limit
+  name: '@zhourenke/dsh-agent-rate-limit'
+  config:
+    verbose: true   # enable debug logging
 ```
-
-> ⚠️ Do not edit `~/.dsh/profiles/web/cordis.patch.yml` — it will cause a `duplicate loader entry id: agent-rate-limit` error.
 
 | Key | Default | Description |
 |-----|---------|-------------|
