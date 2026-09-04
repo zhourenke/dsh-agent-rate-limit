@@ -412,17 +412,22 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       let hadFailure = false
       let actualInputTokens = 0
       let actualOutputTokens = 0
+      let lastUsage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined
       for await (const chunk of originalStream) {
         const chunkObj = chunk as {
           type?: string
           text?: string
           argumentsDelta?: string
-          usage?: { inputTokens: number; outputTokens: number }
+          usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
           reason?: { kind?: string }
         }
-        // Capture the actual token usage from the API's usage chunk
+        // Capture the actual token usage from the API's usage chunk.
+        // Note: inputTokens is uncached input only; cache hits are reported
+        // separately as cacheReadTokens/cacheWriteTokens. We include all of
+        // them to match the API's billed total.
         if (chunkObj.type === 'usage' && chunkObj.usage) {
-          actualInputTokens = chunkObj.usage.inputTokens
+          lastUsage = { inputTokens: chunkObj.usage.inputTokens, cacheReadTokens: chunkObj.usage.cacheReadTokens, cacheWriteTokens: chunkObj.usage.cacheWriteTokens }
+          actualInputTokens = chunkObj.usage.inputTokens + (chunkObj.usage.cacheReadTokens ?? 0) + (chunkObj.usage.cacheWriteTokens ?? 0)
           actualOutputTokens = chunkObj.usage.outputTokens
         }
         // Count output tokens from text/reasoning/tool-call deltas (fallback)
@@ -454,7 +459,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           ? actualInputTokens + actualOutputTokens
           : estimatedInputTokens + outputTokens
         addToWindow(totalTokens, Date.now())
-        if (verbose) console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${actualInputTokens}i + ${actualOutputTokens}o)`)
+        if (verbose) console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${actualInputTokens}i + ${actualOutputTokens}o)${lastUsage ? `  uncached: ${lastUsage.inputTokens} + cache: ${(lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheWriteTokens ?? 0)}` : ''}`)
         // Store the actual input count so the next request can use it
         // as a much more accurate estimate than heuristic calculation.
         // Keep a sliding window of the last 3 values for a stable moving average.
