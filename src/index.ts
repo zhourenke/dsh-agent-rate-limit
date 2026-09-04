@@ -459,7 +459,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           ? actualInputTokens + actualOutputTokens
           : estimatedInputTokens + outputTokens
         addToWindow(totalTokens, Date.now())
-        if (verbose) console.log(`[agent-rate-limit] +${totalTokens} tokens: input ${actualInputTokens}${lastUsage ? ` (uncached ${lastUsage.inputTokens}, cached ${(lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheWriteTokens ?? 0)})` : ''} + output ${actualOutputTokens}`)
+        if (verbose) console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens${lastUsage ? ` (uncached: ${lastUsage.inputTokens}, cached: ${(lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheWriteTokens ?? 0)}, output: ${actualOutputTokens})` : ` (estimated: ${estimatedInputTokens}i + ${outputTokens}o)`}`)
         // Store the actual input count so the next request can use it
         // as a much more accurate estimate than heuristic calculation.
         // Keep a sliding window of the last 3 values for a stable moving average.
