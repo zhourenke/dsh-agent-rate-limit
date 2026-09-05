@@ -66,9 +66,26 @@ Current:
 
 ### Token tracking
 
-1. **Token recording**: After each successful model call, the plugin records the exact token count from the API's `usage` chunk.
+1. **Token recording**: After each successful model call, the plugin records the exact token count from the API's `usage` chunk, **including cache hits** (`cacheReadTokens`/`cacheWriteTokens`), to match the API billed total.
 2. **Sliding window**: A 60-second FIFO queue tracks recent token consumption. Before each request, the plugin checks if the current window is approaching the TPM or RPM limit and delays accordingly.
 3. **Input estimation**: Uses the average of the last 3 actual input token counts from the API. Falls back to heuristic estimation only for the very first request.
+
+Log example:
+
+```
+Recorded 113190 tokens (uncached: 1322, cached: 111616, output: 252)
+```
+
+### Delay algorithm
+
+When the window approaches the TPM limit, the plugin calculates how long to wait for enough old entries to expire. It walks from the **newest entries** backward, finds the split point where "keep newest, discard oldest" brings the window below the limit, and waits for the right entry to expire.
+
+Under concurrent agents, other agents keep adding tokens during the delay. The plugin automatically scales the delay by the TPM overshoot ratio:
+
+```
+Delaying 6854ms (TPM: 977031/960000 ×1.02, RPM: 12/15000, ...)  ← slight overshoot, minimal adjustment
+Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 83% overshoot, 83% longer delay
+```
 
 ### Error recovery
 
