@@ -511,9 +511,16 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       /throttl/i.test(errorMessage) ||
       /quota/i.test(errorMessage) ||
       /429/i.test(errorMessage) ||
-      // Transient server overloads (Nvidia, etc.)
+      // Transient server overloads (Nvidia, OpenAI, etc.)
       /service temporarily overloaded/i.test(errorMessage) ||
-      /PI_AI_ERROR/i.test(errorMessage)
+      /PI_AI_ERROR/i.test(errorMessage) ||
+      errorCode === 'PI_AI_ERROR' ||
+      // Upstream HTTP/2 stream failures (transient transport errors)
+      /upstream.*http\/?\s*2.*stream/i.test(errorMessage) ||
+      /http\/?\s*2.*stream.*fail/i.test(errorMessage) ||
+      // Content policy false positives (retry in case provider filter is flaky)
+      /invalid prompt.*flag/i.test(errorMessage) ||
+      /violat.*usage.polic/i.test(errorMessage)
 
     if (isRetryable) {
       if (retryOn429) {
