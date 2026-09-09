@@ -59,9 +59,6 @@ const windowEntries: WindowEntry[] = []
 /** @internal Consecutive rate-limit error counter. */
 let consecutiveErrors = 0
 
-/** @internal Timestamp of the last rate-limit error (ms). 0 = no recent error. */
-let lastRateLimitErrorAt = 0
-
 /** @internal Whether to silently retry on 429 errors. */
 let retryOn429 = DEFAULT_RETRY_ON_429
 
@@ -115,7 +112,6 @@ function initRateLimiter(config: {
   verbose = config.verbose
   windowEntries.length = 0
   consecutiveErrors = 0
-  lastRateLimitErrorAt = 0
   retryCount = 0
   recentInputTokens.length = 0
 }
@@ -161,10 +157,6 @@ function addToWindow(tokens: number, now: number): void {
 function recordError(): void {
   consecutiveErrors++
   retryCount++
-  const now = Date.now()
-  if (now - lastRateLimitErrorAt > 10_000) {
-    lastRateLimitErrorAt = now
-  }
 }
 
 /**
@@ -174,7 +166,6 @@ function recordError(): void {
 function resetErrors(): void {
   consecutiveErrors = 0
   retryCount = 0
-  // Keep lastRateLimitErrorAt so the backoff still decays gradually
 }
 
 /**
@@ -197,12 +188,7 @@ function getBackoffDelay(): number {
  * @internal
  */
 function getEffectiveTpmLimit(): number {
-  if (lastRateLimitErrorAt === 0) return tpmLimit * safetyFactor
-  const msSinceError = Date.now() - lastRateLimitErrorAt
-  if (msSinceError > 60_000) return tpmLimit * safetyFactor
-  // Reduce by up to 50% right after an error, decaying back to safetyFactor
-  const reduction = Math.max(0.5, 1 - msSinceError / 120_000)
-  return tpmLimit * safetyFactor * reduction
+  return tpmLimit * safetyFactor
 }
 
 /**
