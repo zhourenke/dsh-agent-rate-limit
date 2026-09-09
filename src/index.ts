@@ -183,8 +183,7 @@ function getBackoffDelay(): number {
 }
 
 /**
- * Get the effective TPM limit, reduced when a recent rate-limit error occurred.
- * The reduction decays linearly over 60 seconds after the last error.
+ * Get the effective TPM limit after applying the safety factor.
  * @internal
  */
 function getEffectiveTpmLimit(): number {
