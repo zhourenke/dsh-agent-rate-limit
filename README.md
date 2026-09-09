@@ -89,17 +89,19 @@ Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 超限 83%
 
 ### 错误恢复
 
-插件以递增退避（`2s → 4s → 8s → 16s → 30s`，上限 `maxBackoffMs`）重试以下错误：
+插件以递增退避（`2s → 4s → 8s → 16s → 30s`，上限 `maxBackoffMs`）静默重试以下错误：
 
 - **HTTP 429**（频率限制 / 配额超限）
 - **Nvidia `Service temporarily overloaded` / `PI_AI_ERROR`**（临时服务器过载）
+- **Upstream HTTP/2 stream failed**（传输层临时错误）
+- **Invalid prompt / content policy flag**（供应商内容过滤器误报）
 - 其他符合检测模式的临时性错误
 
 连续失败 `maxRetries` 次后放弃，将错误呈现给用户。成功调用后重置重试计数。
 
 ### 错误检测
 
-插件通过检查错误的 `statusCode`、`code` 和 `message` 字段匹配以下模式：`rate limit`、`too many requests`、`tpm`、`rpm`、`quota`、`throttl`、`429`、`service temporarily overloaded`、`PI_AI_ERROR`。
+插件通过检查错误的 `statusCode`、`code` 和 `message` 字段匹配以下模式：`rate limit`、`too many requests`、`tpm`、`rpm`、`quota`、`throttl`、`429`、`service temporarily overloaded`、`PI_AI_ERROR`（同时检查 `message` 和 `code` 字段）、`upstream.*http.*stream`、`invalid prompt`、`violat.*usage.polic`。
 
 ## Credits
 

@@ -89,17 +89,19 @@ Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 83% oversh
 
 ### Error recovery
 
-The plugin retries the following errors with escalating backoff (`2s → 4s → 8s → 16s → 30s`, capped at `maxBackoffMs`):
+The plugin silently retries the following errors with escalating backoff (`2s → 4s → 8s → 16s → 30s`, capped at `maxBackoffMs`):
 
 - **HTTP 429** (rate limit / quota exceeded)
 - **Nvidia `Service temporarily overloaded` / `PI_AI_ERROR`** (transient server overload)
+- **Upstream HTTP/2 stream failed** (transient transport errors)
+- **Invalid prompt / content policy flag** (provider filter false positives)
 - Other provider-specific transient errors matching the detection patterns
 
 After `maxRetries` consecutive failures, the plugin gives up and surfaces the error to the user. The retry counter resets on success.
 
 ### Rate limit detection
 
-The plugin detects retryable errors by checking the error's `statusCode`, `code`, and `message` for patterns like `rate limit`, `too many requests`, `tpm`, `rpm`, `quota`, `throttl`, `429`, `service temporarily overloaded`, and `PI_AI_ERROR`.
+The plugin detects retryable errors by checking the error's `statusCode`, `code`, and `message` for patterns like `rate limit`, `too many requests`, `tpm`, `rpm`, `quota`, `throttl`, `429`, `service temporarily overloaded`, `PI_AI_ERROR` (checked on both `message` and `code`), `upstream.*http.*stream`, `invalid prompt`, `violat.*usage.polic`.
 
 ## Credits
 
