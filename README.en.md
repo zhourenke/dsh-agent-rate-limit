@@ -12,6 +12,17 @@ dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 
 This installs the package from GitHub, detects the `dsh.bundle` declaration, and automatically registers it as a profile layer. Restart DSH to activate.
 
+## Compatibility
+
+Tested with **DSH v0.1.5-rc.1** (September 2026). The plugin requires the following runtime packages:
+
+- `@deepseek-ai/schemastery` (configuration schema)
+- `@deepseek-ai/cordis` (plugin framework)
+- `@deepseek-ai/dsh-llm` (LLM stream interface)
+- `@deepseek-ai/dsh-invariants` (runtime invariants)
+
+Install dependencies before use with the corresponding DSH version.
+
 To uninstall:
 
 ```powershell
@@ -106,3 +117,5 @@ The plugin detects retryable errors by checking the error's `statusCode`, `code`
 ## Credits
 
 Built for [DeepSeek Harness](https://github.com/deepseek-ai/dsh).
+
+Tested with DSH v0.1.5-rc.1.

@@ -12,6 +12,17 @@ dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 
 此命令从 GitHub 下载包，自动检测 `dsh.bundle` 声明并注册为 profile 层。重启 DSH 后生效。
 
+## 兼容性
+
+已在 **DSH v0.1.5-rc.1**（2026 年 9 月）版本下测试通过。插件依赖以下运行时包：
+
+- `@deepseek-ai/schemastery`（配置校验）
+- `@deepseek-ai/cordis`（插件框架）
+- `@deepseek-ai/dsh-llm`（LLM 流接口）
+- `@deepseek-ai/dsh-invariants`（运行时不变性）
+
+安装依赖后即可在相应版本的 DSH 中使用。
+
 卸载：
 
 ```powershell
@@ -106,3 +117,5 @@ Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 超限 83%
 ## Credits
 
 Built for [DeepSeek Harness](https://github.com/deepseek-ai/dsh).
+
+Tested with DSH v0.1.5-rc.1.
