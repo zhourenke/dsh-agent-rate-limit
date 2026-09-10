@@ -5,8 +5,10 @@
  * RPM (Requests Per Minute) limit violations by intercepting the LLM
  * streaming pipeline and adding adaptive delays between requests.
  *
- * Supports configurable limits, exponential backoff on rate-limit errors,
- * and a sliding-window algorithm that tracks both input and output tokens.
+ * Supports configurable limits and a sliding-window algorithm that tracks
+ * both input and output tokens. Retry logic for 429/rate-limit errors is
+ * delegated to the built-in DSH `dsh-llm-retry` plugin via provider-level
+ * `retryPolicy` configuration.
  *
  * @module @zhourenke/dsh-agent-rate-limit
  */
@@ -29,15 +31,6 @@ const DEFAULT_RPM_LIMIT = 15_000
 /** Default safety factor (0.8 = use 80% of the limit to leave buffer). */
 const DEFAULT_SAFETY_FACTOR = 0.8
 
-/** Default: silently retry 429 errors (true) or surface them to the user (false). */
-const DEFAULT_RETRY_ON_429 = true
-
-/** Default maximum consecutive 429 retries per burst before giving up. */
-const DEFAULT_MAX_RETRIES = 5
-
-/** Default maximum exponential backoff delay in milliseconds. */
-const DEFAULT_MAX_BACKOFF_MS = 30_000
-
 /** Default: verbose logging (false = only log startup and critical errors). */
 const DEFAULT_VERBOSE = false
 
@@ -55,15 +48,6 @@ interface WindowEntry {
 
 /** @internal Sliding-window rate limiter state. */
 const windowEntries: WindowEntry[] = []
-
-/** @internal Consecutive rate-limit error counter. */
-let consecutiveErrors = 0
-
-/** @internal Whether to silently retry on 429 errors. */
-let retryOn429 = DEFAULT_RETRY_ON_429
-
-/** @internal Consecutive 429 retry count in the current burst. */
-let retryCount = 0
 
 /** @internal Recent actual input token counts from the API usage chunk (max 3 entries). */
 const recentInputTokens: number[] = []
@@ -84,8 +68,6 @@ let windowMs = DEFAULT_WINDOW_MS
 let tpmLimit = DEFAULT_TPM_LIMIT
 let rpmLimit = DEFAULT_RPM_LIMIT
 let safetyFactor = DEFAULT_SAFETY_FACTOR
-let maxBackoffMs = DEFAULT_MAX_BACKOFF_MS
-let maxRetries = DEFAULT_MAX_RETRIES
 let verbose = DEFAULT_VERBOSE
 
 /**
@@ -97,22 +79,14 @@ function initRateLimiter(config: {
   tpmLimit: number
   rpmLimit: number
   safetyFactor: number
-  maxBackoffMs: number
-  retryOn429: boolean
-  maxRetries: number
   verbose: boolean
 }): void {
   windowMs = config.windowMs
   tpmLimit = config.tpmLimit
   rpmLimit = config.rpmLimit
   safetyFactor = config.safetyFactor
-  maxBackoffMs = config.maxBackoffMs
-  retryOn429 = config.retryOn429
-  maxRetries = config.maxRetries
   verbose = config.verbose
   windowEntries.length = 0
-  consecutiveErrors = 0
-  retryCount = 0
   recentInputTokens.length = 0
 }
 
@@ -148,38 +122,6 @@ function addToWindow(tokens: number, now: number): void {
   // Prune first to keep the array small
   pruneWindow(now)
   windowEntries.push({ timestamp: now, tokens })
-}
-
-/**
- * Record a rate-limit error for backoff calculation.
- * @internal
- */
-function recordError(): void {
-  consecutiveErrors++
-  retryCount++
-}
-
-/**
- * Reset the consecutive error counter and retry budget.
- * @internal
- */
-function resetErrors(): void {
-  consecutiveErrors = 0
-  retryCount = 0
-}
-
-/**
- * Calculate the adaptive backoff delay based on the retry count.
- * Escalates with each retry: 2s, 4s, 8s, 16s, ... capped at maxBackoffMs.
- * @internal
- */
-function getBackoffDelay(): number {
-  if (retryCount === 0) return 0
-  const delay = Math.min(
-    Math.pow(2, Math.min(retryCount, 5)) * 1000,
-    maxBackoffMs,
-  )
-  return Math.round(delay)
 }
 
 /**
@@ -240,8 +182,8 @@ function calculateDelay(estimatedInputTokens: number, now: number): number {
     }
   }
 
-  // 3. Apply backoff delay (if there were consecutive errors)
-  return getBackoffDelay()
+  // 3. No delay needed
+  return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -306,14 +248,6 @@ function estimateTokensFromMessages(messages: Array<{ content?: unknown[] }>): n
   return total
 }
 
-/**
- * Estimate tokens from a stream chunk delta text.
- * @internal
- */
-function estimateTokensFromDelta(delta: string): number {
-  return estimateTokens(delta)
-}
-
 // ---------------------------------------------------------------------------
 // Plugin definition
 // ---------------------------------------------------------------------------
@@ -330,20 +264,16 @@ const Config = z.object({
   tpmLimit: z.number().default(DEFAULT_TPM_LIMIT),
   rpmLimit: z.number().default(DEFAULT_RPM_LIMIT),
   safetyFactor: z.number().default(DEFAULT_SAFETY_FACTOR),
-  maxBackoffMs: z.number().default(DEFAULT_MAX_BACKOFF_MS),
-  retryOn429: z.boolean().default(DEFAULT_RETRY_ON_429),
-  maxRetries: z.number().default(DEFAULT_MAX_RETRIES),
   verbose: z.boolean().default(DEFAULT_VERBOSE),
 })
 
 /**
  * Register the agent rate limiter.
  *
- * Intercepts two Waterfall events:
- * - `llm/stream`: adds a delay before each LLM request based on the sliding
- *   window state, then counts output tokens from the stream chunks.
- * - `agent/request-error`: detects rate-limit errors (HTTP 429) and returns
- *   `{ kind: 'retry' }` with exponential backoff.
+ * Intercepts the `llm/stream` Waterfall event to add a delay before each LLM
+ * request based on the sliding window state, then records actual token usage
+ * from the stream. Retry logic is delegated to the built-in DSH `dsh-llm-retry`
+ * plugin via provider-level `retryPolicy` configuration.
  */
 async function apply(ctx: Record<string, unknown>, config: Record<string, unknown>): Promise<void> {
   // Initialize rate limiter state
@@ -352,13 +282,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
     tpmLimit: Number(config.tpmLimit ?? DEFAULT_TPM_LIMIT),
     rpmLimit: Number(config.rpmLimit ?? DEFAULT_RPM_LIMIT),
     safetyFactor: Number(config.safetyFactor ?? DEFAULT_SAFETY_FACTOR),
-    maxBackoffMs: Number(config.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS),
-    retryOn429: config.retryOn429 !== false,
-    maxRetries: Number(config.maxRetries ?? DEFAULT_MAX_RETRIES),
     verbose: config.verbose === true,
   }
   initRateLimiter(cfg)
-  if (verbose) console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, retryOn429: ${cfg.retryOn429}, maxRetries: ${cfg.maxRetries}, verbose: ${cfg.verbose}`)
+  if (verbose) console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, verbose: ${cfg.verbose}`)
 
   const timer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
@@ -391,12 +318,11 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       if (delay > 0) {
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
-        if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit}, retries: ${retryCount}/${maxRetries})`)
+        if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
         await timer.timer.timeout(delay)
       }
 
       // Stream chunks, capture actual API token usage, and detect failures
-      let outputTokens = 0
       let hadFailure = false
       let actualInputTokens = 0
       let actualOutputTokens = 0
@@ -404,8 +330,6 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
       for await (const chunk of originalStream) {
         const chunkObj = chunk as {
           type?: string
-          text?: string
-          argumentsDelta?: string
           usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
           reason?: { kind?: string }
         }
@@ -418,18 +342,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           actualInputTokens = chunkObj.usage.inputTokens + (chunkObj.usage.cacheReadTokens ?? 0) + (chunkObj.usage.cacheWriteTokens ?? 0)
           actualOutputTokens = chunkObj.usage.outputTokens
         }
-        // Count output tokens from text/reasoning/tool-call deltas (fallback)
-        if (chunkObj.type === 'text-delta' && typeof chunkObj.text === 'string') {
-          outputTokens += estimateTokensFromDelta(chunkObj.text)
-        } else if (chunkObj.type === 'reasoning-delta' && typeof chunkObj.text === 'string') {
-          outputTokens += estimateTokensFromDelta(chunkObj.text)
-        } else if (chunkObj.type === 'tool-call-delta' && typeof chunkObj.argumentsDelta === 'string') {
-          outputTokens += estimateTokensFromDelta(chunkObj.argumentsDelta)
-        }
         // Detect terminal error/aborted finish chunks — the LLM adapter signals
         // failures (e.g. HTTP 429) as finish chunks, NOT by throwing. Without
         // this check, the for-await loop completes normally, and the code
-        // below would incorrectly record tokens and reset the retry budget.
+        // below would incorrectly record tokens.
         if (chunkObj.type === 'finish' && chunkObj.reason) {
           const reasonKind = chunkObj.reason.kind
           if (reasonKind === 'error' || reasonKind === 'aborted') {
@@ -439,15 +355,15 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         yield chunk
       }
 
-      // Only record usage and reset retry budget on successful completion
+      // Only record usage on successful completion
       if (!hadFailure) {
         // Use the API's actual token counts when available (far more accurate
-        // than heuristic estimation), otherwise fall back to the heuristic sum.
+        // than heuristic estimation), otherwise fall back to the estimated sum.
         const totalTokens = actualInputTokens > 0
           ? actualInputTokens + actualOutputTokens
-          : estimatedInputTokens + outputTokens
+          : estimatedInputTokens
         addToWindow(totalTokens, Date.now())
-        if (verbose) console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens${lastUsage ? ` (uncached: ${lastUsage.inputTokens}, cached: ${(lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheWriteTokens ?? 0)}, output: ${actualOutputTokens})` : ` (estimated: ${estimatedInputTokens}i + ${outputTokens}o)`}`)
+        if (verbose) console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens${lastUsage ? ` (uncached: ${lastUsage.inputTokens}, cached: ${(lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheWriteTokens ?? 0)}, output: ${actualOutputTokens})` : ` (estimated: ${estimatedInputTokens}i)`}`)
         // Store the actual input count so the next request can use it
         // as a much more accurate estimate than heuristic calculation.
         // Keep a sliding window of the last 3 values for a stable moving average.
@@ -457,77 +373,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
             recentInputTokens.shift()
           }
         }
-        resetErrors()
       }
     })()
 
     return wrappedStream
-  })
-
-  /**
-   * Intercept request errors to retry transient failures.
-   *
-   * Detects HTTP 429 (rate limit / quota), as well as transient server
-   * overloads (e.g. Nvidia "Service temporarily overloaded"). These are
-   * typically resolved by a short delay and retry. Set `retryOn429: false`
-   * in the config to surface all retryable errors to the user instead.
-   */
-  ctx.on('agent/request-error', async (payload: unknown, next: () => Promise<{ kind: string }>) => {
-    const p = payload as {
-      failure?: { message?: string; code?: string; statusCode?: number }
-    }
-    const failure = p.failure
-    const errorMessage = typeof failure?.message === 'string' ? failure.message : ''
-    const errorCode = typeof failure?.code === 'string' ? failure.code : ''
-    const httpStatus = typeof failure?.statusCode === 'number' ? failure.statusCode : 0
-
-    // Detect retryable errors: HTTP 429 (rate limit / quota) and transient
-    // server overloads (e.g. Nvidia "Service temporarily overloaded").
-    // These are typically resolved by a short delay and retry.
-    const isRetryable =
-      // HTTP 429 / rate limit signals
-      httpStatus === 429 ||
-      errorCode === '429' ||
-      errorCode === 'RATE_LIMITED' ||
-      errorCode === 'QUOTA' ||
-      /rate\s*limit/i.test(errorMessage) ||
-      /too\s+many\s+requests/i.test(errorMessage) ||
-      /tpm|rpm|token.*limit/i.test(errorMessage) ||
-      /throttl/i.test(errorMessage) ||
-      /quota/i.test(errorMessage) ||
-      /429/i.test(errorMessage) ||
-      // Transient server overloads (Nvidia, OpenAI, etc.)
-      /service temporarily overloaded/i.test(errorMessage) ||
-      /PI_AI_ERROR/i.test(errorMessage) ||
-      errorCode === 'PI_AI_ERROR' ||
-      // Upstream HTTP/2 stream failures (transient transport errors)
-      /upstream.*http\/?\s*2.*stream/i.test(errorMessage) ||
-      /http\/?\s*2.*stream.*fail/i.test(errorMessage) ||
-      // Content policy false positives (retry in case provider filter is flaky)
-      /invalid prompt.*flag/i.test(errorMessage) ||
-      /violat.*usage.polic/i.test(errorMessage)
-
-    if (isRetryable) {
-      if (retryOn429) {
-        // Enforce the retry budget: give up after maxRetries consecutive failures
-        // so a permanent error does not loop forever.
-        if (retryCount >= maxRetries) {
-          resetErrors()
-          if (verbose) console.log(`[agent-rate-limit] ❌ Retryable error persists after ${maxRetries} retries, giving up — surfacing to user (${errorCode}: ${errorMessage.slice(0, 120)})`)
-          return next()
-        }
-        recordError()
-        const backoff = getBackoffDelay()
-        if (verbose) console.log(`[agent-rate-limit] Retryable error (retry ${retryCount}/${maxRetries}), retrying in ${backoff}ms (${errorCode}: ${errorMessage.slice(0, 80)})`)
-        return { kind: 'retry' }
-      } else {
-        if (verbose) console.log(`[agent-rate-limit] Retryable error detected but retryOn429=false, surfacing to user (${errorCode}: ${errorMessage.slice(0, 80)})`)
-        return next()
-      }
-    }
-
-    // For non-429 errors, delegate to the default handler
-    return next()
   })
 
   // Register /agent-rate-limit command
@@ -550,14 +399,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
             `  RPM limit:     ${rpmLimit.toLocaleString()}`,
             `  Safety factor: ${safetyFactor}`,
             `  Window:        ${windowMs / 1000}s`,
-            `  Retry on 429:  ${retryOn429}`,
-            `  Max retries:   ${maxRetries}`,
             `  Verbose:       ${verbose}`,
             `Current:`,
             `  Window entries:  ${windowEntries.length}`,
             `  Current TPM:     ${currentTpm.toLocaleString()}`,
-            `  Consecutive err: ${consecutiveErrors}`,
-            `  Retry count:     ${retryCount}`,
             '━━━━━━━━━━━━━━━━━━━━━━',
           ]
           return { kind: 'success', text: lines.join('\n') }
@@ -573,8 +418,5 @@ export {
   DEFAULT_TPM_LIMIT,
   DEFAULT_RPM_LIMIT,
   DEFAULT_SAFETY_FACTOR,
-  DEFAULT_RETRY_ON_429,
-  DEFAULT_MAX_RETRIES,
-  DEFAULT_MAX_BACKOFF_MS,
   DEFAULT_VERBOSE,
 }

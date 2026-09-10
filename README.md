@@ -2,7 +2,7 @@
 
 # @zhourenke/dsh-agent-rate-limit
 
-DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求间添加自适应延迟，防止 TPM/RPM 超限。自动重试 HTTP 429 和临时服务器过载（如 Nvidia `Service temporarily overloaded`），以递增退避恢复。
+DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求前计算滑动窗口 TPM/RPM 余量并添加自适应延迟，防止触发提供商限速。重试逻辑交由 DSH 内置的 `dsh-llm-retry` 插件处理，通过 provider 级别的 `retryPolicy` 配置。
 
 ## 安装
 
@@ -19,7 +19,6 @@ dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 - `@deepseek-ai/schemastery`（配置校验）
 - `@deepseek-ai/cordis`（插件框架）
 - `@deepseek-ai/dsh-llm`（LLM 流接口）
-- `@deepseek-ai/dsh-invariants`（运行时不变性）
 
 安装依赖后即可在相应版本的 DSH 中使用。
 
@@ -47,10 +46,7 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 | `tpmLimit` | `1200000` | TPM 限制。默认匹配阿里云百炼 deepseek-v4-flash。 |
 | `rpmLimit` | `15000` | RPM 限制。 |
 | `safetyFactor` | `0.8` | 安全系数（0.8 = 使用 80% 限额，预留 20% 缓冲）。 |
-| `maxBackoffMs` | `30000` | 最大退避延迟（毫秒，30 秒）。 |
-| `retryOn429` | `true` | 启用后，可重试错误（429、服务器过载）将自动递增退避重试。 |
-| `maxRetries` | `5` | 连续重试上限，超过后放弃。 |
-| `verbose` | `false` | 启用后输出每次请求的延迟、令牌记录和重试信息。 |
+| `verbose` | `false` | 启用后输出每次请求的延迟和令牌记录日志。 |
 
 ## 查看状态
 
@@ -63,14 +59,10 @@ Config:
   RPM limit:     15,000
   Safety factor: 0.8
   Window:        60s
-  Retry on 429:  true
-  Max retries:   5
   Verbose:       false
 Current:
   Window entries:  12
   Current TPM:     14,765
-  Consecutive err: 0
-  Retry count:     0
 ```
 
 ## 工作原理
@@ -96,23 +88,6 @@ Recorded 113190 tokens (uncached: 1322, cached: 111616, output: 252)
 ```
 Delaying 6854ms (TPM: 977031/960000 ×1.02, RPM: 12/15000, ...)  ← 轻微超限，几乎不变
 Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 超限 83%，延迟加长 83%
-```
-
-### 错误恢复
-
-插件以递增退避（`2s → 4s → 8s → 16s → 30s`，上限 `maxBackoffMs`）静默重试以下错误：
-
-- **HTTP 429**（频率限制 / 配额超限）
-- **Nvidia `Service temporarily overloaded` / `PI_AI_ERROR`**（临时服务器过载）
-- **Upstream HTTP/2 stream failed**（传输层临时错误）
-- **Invalid prompt / content policy flag**（供应商内容过滤器误报）
-- 其他符合检测模式的临时性错误
-
-连续失败 `maxRetries` 次后放弃，将错误呈现给用户。成功调用后重置重试计数。
-
-### 错误检测
-
-插件通过检查错误的 `statusCode`、`code` 和 `message` 字段匹配以下模式：`rate limit`、`too many requests`、`tpm`、`rpm`、`quota`、`throttl`、`429`、`service temporarily overloaded`、`PI_AI_ERROR`（同时检查 `message` 和 `code` 字段）、`upstream.*http.*stream`、`invalid prompt`、`violat.*usage.polic`。
 
 ## Credits
 

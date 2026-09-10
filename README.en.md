@@ -2,7 +2,7 @@
 
 # @zhourenke/dsh-agent-rate-limit
 
-A DSH agent loop rate limiter. Prevents TPM/RPM limit violations by adding adaptive delays between requests. Retries HTTP 429 and transient server overloads (e.g. Nvidia `Service temporarily overloaded`) with escalating backoff.
+A DSH agent loop rate limiter. Prevents TPM/RPM limit violations by intercepting the LLM streaming pipeline, computing sliding-window headroom before each request, and adding adaptive delays. Retry logic is delegated to DSH's built-in `dsh-llm-retry` plugin via provider-level `retryPolicy` configuration.
 
 ## Installation
 
@@ -19,7 +19,6 @@ Tested with **DSH v0.1.5-rc.1** (September 2026). The plugin requires the follow
 - `@deepseek-ai/schemastery` (configuration schema)
 - `@deepseek-ai/cordis` (plugin framework)
 - `@deepseek-ai/dsh-llm` (LLM stream interface)
-- `@deepseek-ai/dsh-invariants` (runtime invariants)
 
 Install dependencies before use with the corresponding DSH version.
 
@@ -47,10 +46,7 @@ Edit the `cordis.patch.yml`:
 | `tpmLimit` | `1200000` | TPM (Tokens Per Minute) limit. Default matches Alibaba Cloud Bailian deepseek-v4-flash. |
 | `rpmLimit` | `15000` | RPM (Requests Per Minute) limit. |
 | `safetyFactor` | `0.8` | Safety factor (0.8 = use 80% of the limit, leaving 20% buffer). |
-| `maxBackoffMs` | `30000` | Maximum backoff delay in milliseconds (30s). |
-| `retryOn429` | `true` | When `true`, retryable errors (429, server overloads) are silently retried with escalating backoff. |
-| `maxRetries` | `5` | Maximum consecutive retries per burst before giving up. |
-| `verbose` | `false` | When `true`, log per-request details (delay, token recording, retry attempts). |
+| `verbose` | `false` | When `true`, log per-request details (delay and token recording). |
 
 ## Check status
 
@@ -63,14 +59,10 @@ Config:
   RPM limit:     15,000
   Safety factor: 0.8
   Window:        60s
-  Retry on 429:  true
-  Max retries:   5
   Verbose:       false
 Current:
   Window entries:  12
   Current TPM:     14,765
-  Consecutive err: 0
-  Retry count:     0
 ```
 
 ## How it works
@@ -98,24 +90,8 @@ Delaying 6854ms (TPM: 977031/960000 ×1.02, RPM: 12/15000, ...)  ← slight over
 Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 83% overshoot, 83% longer delay
 ```
 
-### Error recovery
-
-The plugin silently retries the following errors with escalating backoff (`2s → 4s → 8s → 16s → 30s`, capped at `maxBackoffMs`):
-
-- **HTTP 429** (rate limit / quota exceeded)
-- **Nvidia `Service temporarily overloaded` / `PI_AI_ERROR`** (transient server overload)
-- **Upstream HTTP/2 stream failed** (transient transport errors)
-- **Invalid prompt / content policy flag** (provider filter false positives)
-- Other provider-specific transient errors matching the detection patterns
-
-After `maxRetries` consecutive failures, the plugin gives up and surfaces the error to the user. The retry counter resets on success.
-
-### Rate limit detection
-
-The plugin detects retryable errors by checking the error's `statusCode`, `code`, and `message` for patterns like `rate limit`, `too many requests`, `tpm`, `rpm`, `quota`, `throttl`, `429`, `service temporarily overloaded`, `PI_AI_ERROR` (checked on both `message` and `code`), `upstream.*http.*stream`, `invalid prompt`, `violat.*usage.polic`.
-
 ## Credits
 
-Built for [DeepSeek Harness](https://github.com/deepseek-ai/dsh).
+Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
 Tested with DSH v0.1.5-rc.1.
