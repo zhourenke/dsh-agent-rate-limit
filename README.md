@@ -12,6 +12,12 @@ dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 
 此命令从 GitHub 下载包，自动检测 `dsh.bundle` 声明并注册为 profile 层。重启 DSH 后生效。
 
+卸载：
+
+```powershell
+dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
+```
+
 ## 兼容性
 
 已在 **DSH v0.1.5-rc.1**（2026 年 9 月）版本下测试通过。插件依赖以下运行时包：
@@ -21,12 +27,6 @@ dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 - `@deepseek-ai/dsh-llm`（LLM 流接口）
 
 安装依赖后即可在相应版本的 DSH 中使用。
-
-卸载：
-
-```powershell
-dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
-```
 
 ## 配置
 
