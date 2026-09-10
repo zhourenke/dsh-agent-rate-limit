@@ -138,8 +138,6 @@ function getEffectiveTpmLimit(): number {
  * @internal
  */
 function calculateDelay(estimatedInputTokens: number, now: number): number {
-  pruneWindow(now)
-
   const effectiveTpmLimit = getEffectiveTpmLimit()
   const currentTpm = sumWindow(now)
   const currentRpm = windowEntries.length
@@ -287,7 +285,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
   initRateLimiter(cfg)
   if (verbose) console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, verbose: ${cfg.verbose}`)
 
-  const timer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
+  const ctxWithTimer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
   /**
    * Intercept the LLM stream waterfall to apply rate limiting.
@@ -319,14 +317,17 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
         if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
-        await timer.timer.timeout(delay)
+        await ctxWithTimer.timer.timeout(delay)
       }
 
       // Stream chunks, capture actual API token usage, and detect failures
       let hadFailure = false
       let actualInputTokens = 0
       let actualOutputTokens = 0
-      let lastUsage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined
+      // Usage breakdown for verbose logging (uncached + cache hits)
+      let usageUncached = 0
+      let usageCachedRead = 0
+      let usageCachedWrite = 0
       for await (const chunk of originalStream) {
         const chunkObj = chunk as {
           type?: string
@@ -338,8 +339,10 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         // separately as cacheReadTokens/cacheWriteTokens. We include all of
         // them to match the API's billed total.
         if (chunkObj.type === 'usage' && chunkObj.usage) {
-          lastUsage = { inputTokens: chunkObj.usage.inputTokens, cacheReadTokens: chunkObj.usage.cacheReadTokens, cacheWriteTokens: chunkObj.usage.cacheWriteTokens }
-          actualInputTokens = chunkObj.usage.inputTokens + (chunkObj.usage.cacheReadTokens ?? 0) + (chunkObj.usage.cacheWriteTokens ?? 0)
+          usageUncached = chunkObj.usage.inputTokens
+          usageCachedRead = chunkObj.usage.cacheReadTokens ?? 0
+          usageCachedWrite = chunkObj.usage.cacheWriteTokens ?? 0
+          actualInputTokens = usageUncached + usageCachedRead + usageCachedWrite
           actualOutputTokens = chunkObj.usage.outputTokens
         }
         // Detect terminal error/aborted finish chunks — the LLM adapter signals
@@ -363,7 +366,12 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
           ? actualInputTokens + actualOutputTokens
           : estimatedInputTokens
         addToWindow(totalTokens, Date.now())
-        if (verbose) console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens${lastUsage ? ` (uncached: ${lastUsage.inputTokens}, cached: ${(lastUsage.cacheReadTokens ?? 0) + (lastUsage.cacheWriteTokens ?? 0)}, output: ${actualOutputTokens})` : ` (estimated: ${estimatedInputTokens}i)`}`)
+        if (verbose) {
+          const detail = actualInputTokens > 0
+            ? `uncached: ${usageUncached}, cached: ${usageCachedRead + usageCachedWrite}, output: ${actualOutputTokens}`
+            : `estimated: ${estimatedInputTokens}i`
+          console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${detail})`)
+        }
         // Store the actual input count so the next request can use it
         // as a much more accurate estimate than heuristic calculation.
         // Keep a sliding window of the last 3 values for a stable moving average.
