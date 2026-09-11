@@ -265,6 +265,33 @@ const Config = z.object({
   verbose: z.boolean().default(DEFAULT_VERBOSE),
 })
 
+/** One command registration accepted by the injected `commands` service. */
+interface CommandDefinition {
+  /** Command name invoked as `/<name>`. */
+  name: string
+  /** One-line description shown in command listings. */
+  description: string
+  /** Produce the command's rendered result. */
+  handler: () => { kind: string; text?: string }
+}
+
+/**
+ * The minimal structural view of the Cordis plugin context this plugin uses.
+ *
+ * Declaring it locally keeps the plugin independent of DSH's published type
+ * packages while still type-checking every call site.
+ */
+interface PluginContext {
+  /** Subscribe to a Waterfall event. */
+  on(name: string, handler: (options: unknown, next: () => AsyncIterable<unknown>) => unknown): void
+  /** Register a lifecycle effect, disposed together with the plugin. */
+  effect?(callback: () => void): void
+  /** Injected timeout service. */
+  timer: { timeout: (ms: number) => Promise<void> }
+  /** Injected command registry. */
+  commands?: { register(definition: CommandDefinition): () => void }
+}
+
 /**
  * Register the agent rate limiter.
  *
@@ -273,7 +300,7 @@ const Config = z.object({
  * from the stream. Retry logic is delegated to the built-in DSH `dsh-llm-retry`
  * plugin via provider-level `retryPolicy` configuration.
  */
-async function apply(ctx: Record<string, unknown>, config: Record<string, unknown>): Promise<void> {
+async function apply(ctx: PluginContext, config: Record<string, unknown>): Promise<void> {
   // Initialize rate limiter state
   const cfg = {
     windowMs: Number(config.windowMs ?? DEFAULT_WINDOW_MS),
@@ -284,8 +311,6 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
   }
   initRateLimiter(cfg)
   if (verbose) console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, verbose: ${cfg.verbose}`)
-
-  const ctxWithTimer = ctx as { timer: { timeout: (ms: number) => Promise<void> } }
 
   /**
    * Intercept the LLM stream waterfall to apply rate limiting.
@@ -317,7 +342,7 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
         if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
-        await ctxWithTimer.timer.timeout(delay)
+        await ctx.timer.timeout(delay)
       }
 
       // Stream chunks, capture actual API token usage, and detect failures
@@ -388,9 +413,8 @@ async function apply(ctx: Record<string, unknown>, config: Record<string, unknow
   })
 
   // Register /agent-rate-limit command
-  const ctxAny = ctx as Record<string, unknown>
-  ctxAny.effect?.(() => {
-    const cmds = ctxAny.commands as { register: (def: { name: string; description: string; handler: () => { kind: string; text?: string } }) => () => void }
+  ctx.effect?.(() => {
+    const cmds = ctx.commands
     if (cmds) {
       cmds.register({
         name: 'agent-rate-limit',
