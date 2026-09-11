@@ -30,7 +30,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test"
+    "test": "pnpm run build && node --test"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
