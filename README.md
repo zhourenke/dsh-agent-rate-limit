@@ -88,9 +88,24 @@ Recorded 113190 tokens (uncached: 1322, cached: 111616, output: 252)
 ```
 Delaying 6854ms (TPM: 977031/960000 ×1.02, RPM: 12/15000, ...)  ← 轻微超限，几乎不变
 Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 超限 83%，延迟加长 83%
+```
+
+## 开发
+
+```powershell
+pnpm install        # 安装开发依赖
+pnpm run typecheck  # 类型检查
+pnpm run build      # 编译到 lib/
+```
+
+**每次修改 `src/index.ts` 后必须运行 `pnpm run build`，并把 `lib/` 一并提交。**
+
+`dsh plugin add github:...` 只接收仓库中已被 git 跟踪的文件。本仓库直接提交编译产物，而不是在安装时构建，所以 `lib/` 必须与源码保持同步；否则从 GitHub 安装的插件会静默地运行旧代码，不会有任何报错提示。
+
+不要添加 `prepare` 脚本。git 托管的包会在安装时执行它，而 pnpm 默认拦截依赖的构建脚本，这会让 `dsh plugin add` 直接失败，直到用户手动在 profile 的 `pnpm-workspace.yaml` 中放行。
 
 ## Credits
 
-Built for [DeepSeek Harness](https://github.com/deepseek-ai/dsh).
+Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 
 Tested with DSH v0.1.5-rc.1.

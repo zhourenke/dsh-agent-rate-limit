@@ -90,6 +90,20 @@ Delaying 6854ms (TPM: 977031/960000 ×1.02, RPM: 12/15000, ...)  ← slight over
 Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 83% overshoot, 83% longer delay
 ```
 
+## Development
+
+```powershell
+pnpm install        # install dev dependencies
+pnpm run typecheck  # type check
+pnpm run build      # compile to lib/
+```
+
+**Run `pnpm run build` and commit `lib/` after every change to `src/index.ts`.**
+
+`dsh plugin add github:...` only receives files tracked by git. This repository commits its build output instead of building at install time, so `lib/` must stay in sync with the source; otherwise a GitHub-installed plugin silently runs stale code with no error to signal it.
+
+Do not add a `prepare` script. Git-hosted packages run it at install time, and pnpm blocks dependency build scripts by default, so `dsh plugin add` would fail outright until the user manually allows it in the profile's `pnpm-workspace.yaml`.
+
 ## Credits
 
 Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
