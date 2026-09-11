@@ -96,9 +96,12 @@ Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 83% oversh
 pnpm install        # install dev dependencies
 pnpm run typecheck  # type check
 pnpm run build      # compile to lib/
+pnpm test           # execute the lib/ artifact
 ```
 
 **Run `pnpm run build` and commit `lib/` after every change to `src/index.ts`.**
+
+`pnpm test` is not optional. `tsc` only type-checks and transpiles, and the drift check only inspects git state — **nothing ever executes the artifact**. So "the module throws on import" (importing a symbol the host removed, destructuring `undefined` at module scope) stays green until the user restarts DSH and reads the startup log. The test imports the compiled artifact directly and drives it through a mock ctx: loading, event registration, stream wrapping, and window accounting.
 
 `dsh plugin add github:...` only receives files tracked by git. This repository commits its build output instead of building at install time, so `lib/` must stay in sync with the source; otherwise a GitHub-installed plugin silently runs stale code with no error to signal it.
 

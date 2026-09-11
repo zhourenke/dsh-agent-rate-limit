@@ -96,9 +96,12 @@ Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 超限 83%
 pnpm install        # 安装开发依赖
 pnpm run typecheck  # 类型检查
 pnpm run build      # 编译到 lib/
+pnpm test           # 执行 lib/ 产物
 ```
 
 **每次修改 `src/index.ts` 后必须运行 `pnpm run build`，并把 `lib/` 一并提交。**
+
+`pnpm test` 不是可选项。`tsc` 只做类型检查与转译，漂移检查只看 git 状态——**没有任何一步执行过产物**。于是「模块在 import 时抛错」（导入了宿主已删除的符号、在顶层解构了 `undefined`）可以一路绿灯，直到用户重启 DSH 才在启动日志里爆出来。测试直接 `import` 编译产物，用模拟 ctx 走一遍加载、事件注册、流包装与窗口记账。
 
 `dsh plugin add github:...` 只接收仓库中已被 git 跟踪的文件。本仓库直接提交编译产物，而不是在安装时构建，所以 `lib/` 必须与源码保持同步；否则从 GitHub 安装的插件会静默地运行旧代码，不会有任何报错提示。
 

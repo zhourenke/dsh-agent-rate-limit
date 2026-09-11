@@ -265,6 +265,19 @@ const Config = z.object({
   verbose: z.boolean().default(DEFAULT_VERBOSE),
 })
 
+/**
+ * The rendered outcome a command handler returns.
+ *
+ * Mirrors `CommandResult` in `@deepseek-ai/dsh-commands`, which the host
+ * validates at the registry boundary and rejects by throwing
+ * `handler must return a CommandResult`. The union is spelled out with literal
+ * types on purpose: declared as `kind: string` a typo would pass `tsc` and only
+ * surface on the user's first `/agent-rate-limit`.
+ */
+type CommandResult =
+  | { kind: 'success'; text?: string }
+  | { kind: 'error'; text: string }
+
 /** One command registration accepted by the injected `commands` service. */
 interface CommandDefinition {
   /** Command name invoked as `/<name>`. */
@@ -272,7 +285,7 @@ interface CommandDefinition {
   /** One-line description shown in command listings. */
   description: string
   /** Produce the command's rendered result. */
-  handler: () => { kind: string; text?: string }
+  handler: () => CommandResult
 }
 
 /**
@@ -284,12 +297,17 @@ interface CommandDefinition {
 interface PluginContext {
   /** Subscribe to a Waterfall event. */
   on(name: string, handler: (options: unknown, next: () => AsyncIterable<unknown>) => unknown): void
-  /** Register a lifecycle effect, disposed together with the plugin. */
-  effect?(callback: () => void): void
+  /**
+   * Register a lifecycle effect, disposed together with the plugin.
+   *
+   * The callback's return value IS the disposer, so any registration made
+   * inside it has to be returned rather than dropped.
+   */
+  effect?(callback: () => void | (() => void)): void
   /** Injected timeout service. */
   timer: { timeout: (ms: number) => Promise<void> }
-  /** Injected command registry. */
-  commands?: { register(definition: CommandDefinition): () => void }
+  /** Injected command registry; named in `inject`, so it is always present. */
+  commands: { register(definition: CommandDefinition): () => void }
 }
 
 /**
@@ -412,36 +430,39 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
     return wrappedStream
   })
 
-  // Register /agent-rate-limit command
-  ctx.effect?.(() => {
-    const cmds = ctx.commands
-    if (cmds) {
-      cmds.register({
-        name: 'agent-rate-limit',
-        description: 'Show agent-rate-limit plugin status and configuration.',
-        handler: () => {
-          const now = Date.now()
-          pruneWindow(now)
-          const currentTpm = sumWindow(now)
-          const effectiveLimit = getEffectiveTpmLimit()
-          const lines = [
-            `Status: loaded`,
-            `Config:`,
-            `  TPM limit:     ${tpmLimit.toLocaleString()} (effective: ${Math.round(effectiveLimit).toLocaleString()})`,
-            `  RPM limit:     ${rpmLimit.toLocaleString()}`,
-            `  Safety factor: ${safetyFactor}`,
-            `  Window:        ${windowMs / 1000}s`,
-            `  Verbose:       ${verbose}`,
-            `Current:`,
-            `  Window entries:  ${windowEntries.length}`,
-            `  Current TPM:     ${currentTpm.toLocaleString()}`,
-            '━━━━━━━━━━━━━━━━━━━━━━',
-          ]
-          return { kind: 'success', text: lines.join('\n') }
-        },
-      })
-    }
-  })
+  // Register the /agent-rate-limit command.
+  //
+  // The effect callback must RETURN what Cordis hands back: `register()`
+  // returns the exact disposer that unregisters the definition, and dropping
+  // it leaves the registration alive after the plugin unloads. The web profile
+  // reloads patches live, so the next activation would then fail with
+  // `command "agent-rate-limit" is already registered in this scope`.
+  ctx.effect?.(() =>
+    ctx.commands.register({
+      name: 'agent-rate-limit',
+      description: 'Show agent-rate-limit plugin status and configuration.',
+      handler: () => {
+        const now = Date.now()
+        pruneWindow(now)
+        const currentTpm = sumWindow(now)
+        const effectiveLimit = getEffectiveTpmLimit()
+        const lines = [
+          `Status: loaded`,
+          `Config:`,
+          `  TPM limit:     ${tpmLimit.toLocaleString()} (effective: ${Math.round(effectiveLimit).toLocaleString()})`,
+          `  RPM limit:     ${rpmLimit.toLocaleString()}`,
+          `  Safety factor: ${safetyFactor}`,
+          `  Window:        ${windowMs / 1000}s`,
+          `  Verbose:       ${verbose}`,
+          `Current:`,
+          `  Window entries:  ${windowEntries.length}`,
+          `  Current TPM:     ${currentTpm.toLocaleString()}`,
+          '━━━━━━━━━━━━━━━━━━━━━━',
+        ]
+        return { kind: 'success', text: lines.join('\n') }
+      },
+    }),
+  )
 }
 
 export { apply, Config, inject, name }

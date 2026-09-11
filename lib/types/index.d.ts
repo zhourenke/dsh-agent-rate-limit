@@ -41,6 +41,22 @@ declare const Config: z<Schemastery.ObjectS<{
     safetyFactor: z<number, number>;
     verbose: z<boolean, boolean>;
 }>>;
+/**
+ * The rendered outcome a command handler returns.
+ *
+ * Mirrors `CommandResult` in `@deepseek-ai/dsh-commands`, which the host
+ * validates at the registry boundary and rejects by throwing
+ * `handler must return a CommandResult`. The union is spelled out with literal
+ * types on purpose: declared as `kind: string` a typo would pass `tsc` and only
+ * surface on the user's first `/agent-rate-limit`.
+ */
+type CommandResult = {
+    kind: 'success';
+    text?: string;
+} | {
+    kind: 'error';
+    text: string;
+};
 /** One command registration accepted by the injected `commands` service. */
 interface CommandDefinition {
     /** Command name invoked as `/<name>`. */
@@ -48,10 +64,7 @@ interface CommandDefinition {
     /** One-line description shown in command listings. */
     description: string;
     /** Produce the command's rendered result. */
-    handler: () => {
-        kind: string;
-        text?: string;
-    };
+    handler: () => CommandResult;
 }
 /**
  * The minimal structural view of the Cordis plugin context this plugin uses.
@@ -62,14 +75,19 @@ interface CommandDefinition {
 interface PluginContext {
     /** Subscribe to a Waterfall event. */
     on(name: string, handler: (options: unknown, next: () => AsyncIterable<unknown>) => unknown): void;
-    /** Register a lifecycle effect, disposed together with the plugin. */
-    effect?(callback: () => void): void;
+    /**
+     * Register a lifecycle effect, disposed together with the plugin.
+     *
+     * The callback's return value IS the disposer, so any registration made
+     * inside it has to be returned rather than dropped.
+     */
+    effect?(callback: () => void | (() => void)): void;
     /** Injected timeout service. */
     timer: {
         timeout: (ms: number) => Promise<void>;
     };
-    /** Injected command registry. */
-    commands?: {
+    /** Injected command registry; named in `inject`, so it is always present. */
+    commands: {
         register(definition: CommandDefinition): () => void;
     };
 }
