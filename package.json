@@ -30,7 +30,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/index.test.mjs"
+    "test": "node --test"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
