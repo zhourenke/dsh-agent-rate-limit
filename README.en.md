@@ -13,13 +13,6 @@ A DSH agent loop can fire several requests within seconds and easily hit a provi
 - **Billing-accurate accounting**: real token usage is read from the API's `usage` chunk, **cache hits included**, matching the billed total
 - **Removable at any time**: it installs as a profile layer and never patches DSH itself
 
-## Requirements
-
-| Need | Notes |
-|---|---|
-| DSH | Tested with v0.1.5-rc.1 (2026-09) |
-| External software | None. Nothing beyond DSH and Node |
-
 ## Installation
 
 ```powershell
