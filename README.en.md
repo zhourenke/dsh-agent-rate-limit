@@ -2,7 +2,23 @@
 
 # @zhourenke/dsh-agent-rate-limit
 
-A DSH agent loop rate limiter. Prevents TPM/RPM limit violations by intercepting the LLM streaming pipeline, computing sliding-window headroom before each request, and adding adaptive delays. Retry logic is delegated to DSH's built-in `dsh-llm-retry` plugin via provider-level `retryPolicy` configuration.
+**Automatic TPM/RPM rate limiting for DSH: requests are queued against sliding-window headroom before the provider throttles them.**
+
+A DSH agent loop can fire several requests within seconds and easily hit a provider's tokens-per-minute (TPM) or requests-per-minute (RPM) ceiling, which cuts a whole turn short with a 429. This plugin inserts an adaptive delay in front of the LLM streaming pipeline: it passes straight through while the window has headroom and waits only when the window approaches the limit — **it delays, it never rejects**. Works out of the box, no DSH source changes.
+
+## What it solves
+
+- **Throttling that breaks a conversation**: with several agents running at once, token consumption far exceeds any single request, so the plugin queues against a sliding window
+- **No manual tuning**: defaults match common quotas, so it works unconfigured
+- **Billing-accurate accounting**: real token usage is read from the API's `usage` chunk, **cache hits included**, matching the billed total
+- **Removable at any time**: it installs as a profile layer and never patches DSH itself
+
+## Requirements
+
+| Need | Notes |
+|---|---|
+| DSH | Tested with v0.1.5-rc.1 (2026-09) |
+| External software | None. Nothing beyond DSH and Node |
 
 ## Installation
 
@@ -10,17 +26,7 @@ A DSH agent loop rate limiter. Prevents TPM/RPM limit violations by intercepting
 dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 ```
 
-This installs the package from GitHub, detects the `dsh.bundle` declaration, and automatically registers it as a profile layer. Restart DSH to activate.
-
-## Compatibility
-
-Tested with **DSH v0.1.5-rc.1** (September 2026). The plugin requires the following runtime packages:
-
-- `@deepseek-ai/schemastery` (configuration schema)
-- `@deepseek-ai/cordis` (plugin framework)
-- `@deepseek-ai/dsh-llm` (LLM stream interface)
-
-Install dependencies before use with the corresponding DSH version.
+**DSH must be restarted for this to take effect** — the plugin is loaded by the loader at process start, so refreshing the page does nothing.
 
 To uninstall:
 
@@ -28,34 +34,48 @@ To uninstall:
 dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 ```
 
-## Configuration
+## Quick start
 
-Edit the `cordis.patch.yml`:
+The defaults work as-is; install it and you are done. **To confirm it is live**, type this in the chat input:
 
-```yaml
-# ~/.dsh/profiles/web/cordis.patch.yml
-- id: agent-rate-limit
-  name: '@zhourenke/dsh-agent-rate-limit'
-  config:
-    verbose: true   # enable debug logging
+```
+/agent-rate-limit
 ```
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `windowMs` | `60000` | Sliding window size in milliseconds (60s). |
-| `tpmLimit` | `1200000` | TPM (Tokens Per Minute) limit. Default matches Alibaba Cloud Bailian deepseek-v4-flash. |
-| `rpmLimit` | `15000` | RPM (Requests Per Minute) limit. |
-| `safetyFactor` | `0.8` | Safety factor (0.8 = use 80% of the limit, leaving 20% buffer). |
-| `verbose` | `false` | When `true`, log per-request details (delay and token recording). |
+Seeing `Status: loaded` means it is loaded and working.
 
-## Check status
+To change the limits, edit `~/.dsh/profiles/web/cordis.patch.yml`:
 
-Type `/agent-rate-limit` in the chat input:
+```yaml
+- insert:
+    - id: agent-rate-limit
+      name: '@zhourenke/dsh-agent-rate-limit'
+      config:
+        tpmLimit: 1200000
+        rpmLimit: 15000
+        verbose: true
+```
+
+Restart DSH after any change here as well.
+
+## Configuration
+
+| Key | Type | Default | Description |
+|---|---|:---:|---|
+| `windowMs` | number | `60000` | Sliding window size in milliseconds. 60s matches the provider's TPM/RPM accounting period; rarely needs changing |
+| `tpmLimit` | number | `1200000` | Tokens-per-minute ceiling. The default matches Alibaba Cloud Bailian deepseek-v4-flash |
+| `rpmLimit` | number | `15000` | Requests-per-minute ceiling |
+| `safetyFactor` | number | `0.8` | Safety factor. **The effective ceiling is `tpmLimit × safetyFactor`**, so by default only 80% of the quota is used, leaving a 20% buffer |
+| `verbose` | boolean | `false` | Log the delay and token accounting for every request; turn on when diagnosing |
+
+## Checking status
+
+`/agent-rate-limit` prints the current configuration and window occupancy:
 
 ```
 Status: loaded
 Config:
-  TPM limit:     1,200,000 (effective: 959,968)
+  TPM limit:     1,200,000 (effective: 960,000)
   RPM limit:     15,000
   Safety factor: 0.8
   Window:        60s
@@ -65,50 +85,36 @@ Current:
   Current TPM:     14,765
 ```
 
-## How it works
+`Window entries` is the number of requests inside the current 60-second window and `Current TPM` is the tokens accumulated in it. While both sit well below the ceilings the plugin adds no delay at all.
 
-### Token tracking
+## How it affects your requests
 
-1. **Token recording**: After each successful model call, the plugin records the exact token count from the API's `usage` chunk, **including cache hits** (`cacheReadTokens`/`cacheWriteTokens`), to match the API billed total.
-2. **Sliding window**: A 60-second FIFO queue tracks recent token consumption. Before each request, the plugin checks if the current window is approaching the TPM or RPM limit and delays accordingly.
-3. **Input estimation**: Uses the average of the last 3 actual input token counts from the API. Falls back to heuristic estimation only for the very first request.
+- **Delays, never rejects**: the plugin never fails a request and never returns an error; it only waits when it has to
+- **Passes through while there is headroom**: when the accumulated window plus this request's estimated input stays under the effective ceiling, the delay is `0`
+- **Queues only near the ceiling**: it waits until enough old entries slide out of the window to free up room
+- **Scales up under concurrency**: while you wait, other agents keep drawing on the quota, so the plugin multiplies the delay by the overshoot ratio
+- **Failed requests cost no budget**: streams ending in `error` / `aborted` are not recorded, so retries do not slow themselves down
+- **The delay happens before dispatch**: waiting occurs before the stream starts and never interrupts a response already in flight
 
-Log example:
+## Known limitations (measured)
 
-```
-Recorded 113190 tokens (uncached: 1322, cached: 111616, output: 252)
-```
+- **Counted per process**: the window lives inside the DSH process, so multiple DSH instances do not share it — running several profiles at once means each one computes against the full quota, and the total can still exceed it.
+- **Configuration is global across providers**: one configuration applies to every provider under that plugin instance; there is no way to give different providers different ceilings.
+- **The first request can only be estimated**: with an empty window there is no history, so input tokens are estimated heuristically; afterwards the average of the last 3 real API values is used.
+- **A single oversized request cannot be split**: if one request alone approaches the quota, the plugin can only wait for it to slide out of the window, not break it up.
+- **No guarantee against throttling**: the goal is to sharply reduce the probability, not to prove it impossible. If something else consumes the quota at the same time a 429 can still occur — DSH's built-in retry takes over from there.
 
-### Delay algorithm
+## Notes for agents
 
-When the window approaches the TPM limit, the plugin calculates how long to wait for enough old entries to expire. It walks from the **newest entries** backward, finds the split point where "keep newest, discard oldest" brings the window below the limit, and waits for the right entry to expire.
+- This plugin has **no tool and no model-visible interface**; it is entirely transparent to the model and cannot be invoked or controlled by it
+- Rate limiting is automatic: hitting the ceiling shows up as a **slower response**, never as an error
+- To check whether it is live, ask the user to run `/agent-rate-limit`; `Status: loaded` means it is loaded
+- The configuration file is `~/.dsh/profiles/web/cordis.patch.yml` and any change there requires a **DSH restart**
 
-Under concurrent agents, other agents keep adding tokens during the delay. The plugin automatically scales the delay by the TPM overshoot ratio:
+## Compatibility
 
-```
-Delaying 6854ms (TPM: 977031/960000 ×1.02, RPM: 12/15000, ...)  ← slight overshoot, minimal adjustment
-Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 83% overshoot, 83% longer delay
-```
+Tested with **DSH v0.1.5-rc.1** (2026-09).
 
-## Development
+## License
 
-```powershell
-pnpm install        # install dev dependencies
-pnpm run typecheck  # type check
-pnpm run build      # compile to lib/
-pnpm test           # execute the lib/ artifact
-```
-
-**Run `pnpm run build` and commit `lib/` after every change to `src/index.ts`.**
-
-`pnpm test` is not optional. `tsc` only type-checks and transpiles, and the drift check only inspects git state — **nothing ever executes the artifact**. So "the module throws on import" (importing a symbol the host removed, destructuring `undefined` at module scope) stays green until the user restarts DSH and reads the startup log. The test imports the compiled artifact directly and drives it through a mock ctx: loading, event registration, stream wrapping, and window accounting.
-
-`dsh plugin add github:...` only receives files tracked by git. This repository commits its build output instead of building at install time, so `lib/` must stay in sync with the source; otherwise a GitHub-installed plugin silently runs stale code with no error to signal it.
-
-Do not add a `prepare` script. Git-hosted packages run it at install time, and pnpm blocks dependency build scripts by default, so `dsh plugin add` would fail outright until the user manually allows it in the profile's `pnpm-workspace.yaml`.
-
-## Credits
-
-Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
-
-Tested with DSH v0.1.5-rc.1.
+MIT

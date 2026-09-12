@@ -2,7 +2,23 @@
 
 # @zhourenke/dsh-agent-rate-limit
 
-DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求前计算滑动窗口 TPM/RPM 余量并添加自适应延迟，防止触发提供商限速。重试逻辑交由 DSH 内置的 `dsh-llm-retry` 插件处理，通过 provider 级别的 `retryPolicy` 配置。
+**为 DSH 自动加上 TPM/RPM 速率限制：在触发供应商限速之前，先按滑动窗口余量把请求排好队。**
+
+DSH 的 Agent 循环能在几十秒内连续发出多个请求，很容易撞上供应商的每分钟令牌数（TPM）或每分钟请求数（RPM）上限，导致整轮对话被 429 打断。本插件在 LLM 流式管线前插一层自适应延迟：窗口还有余量就直接放行，接近上限才等待——**只延迟，不拒绝**。装好即用，无需改动 DSH 源码。
+
+## 它解决什么问题
+
+- **撞限速导致对话中断**：多个 Agent 并发时令牌消耗远超单次请求的量，插件按滑动窗口提前排队
+- **免人工调参**：默认值匹配常见配额，不配置也能工作
+- **账单口径准确**：从 API 的 `usage` 数据块读取真实令牌消耗，**含缓存命中**，与账单一致
+- **随时可卸**：作为 profile 层插入，不修改 DSH 本体
+
+## 前置条件
+
+| 需要 | 说明 |
+|---|---|
+| DSH | v0.1.5-rc.1（2026-09）下测试通过 |
+| 外部软件 | 无。不需要 Everything、Node 以外的任何东西 |
 
 ## 安装
 
@@ -10,7 +26,7 @@ DSH Agent 速率限制插件。通过拦截 LLM 流式管线，在请求前计�
 dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 ```
 
-此命令从 GitHub 下载包，自动检测 `dsh.bundle` 声明并注册为 profile 层。重启 DSH 后生效。
+**必须重启 DSH 才会生效**——插件由 loader 在进程启动时加载，刷新页面无效。
 
 卸载：
 
@@ -18,44 +34,48 @@ dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 ```
 
-## 兼容性
+## 快速上手
 
-已在 **DSH v0.1.5-rc.1**（2026 年 9 月）版本下测试通过。插件依赖以下运行时包：
+默认配置即可工作，装上就完事。**确认生效**：在聊天输入框输入
 
-- `@deepseek-ai/schemastery`（配置校验）
-- `@deepseek-ai/cordis`（插件框架）
-- `@deepseek-ai/dsh-llm`（LLM 流接口）
+```
+/agent-rate-limit
+```
 
-安装依赖后即可在相应版本的 DSH 中使用。
+看到 `Status: loaded` 就是已经加载并在工作。
+
+要调整限额，编辑 `~/.dsh/profiles/web/cordis.patch.yml`：
+
+```yaml
+- insert:
+    - id: agent-rate-limit
+      name: '@zhourenke/dsh-agent-rate-limit'
+      config:
+        tpmLimit: 1200000
+        rpmLimit: 15000
+        verbose: true
+```
+
+改完同样需要重启 DSH。
 
 ## 配置
 
-编辑 `cordis.patch.yml`：
-
-```yaml
-# ~/.dsh/profiles/web/cordis.patch.yml
-- id: agent-rate-limit
-  name: '@zhourenke/dsh-agent-rate-limit'
-  config:
-    verbose: true   # 启用调试日志
-```
-
-| 配置项 | 默认值 | 说明 |
-|-------|--------|------|
-| `windowMs` | `60000` | 滑动窗口大小（毫秒，60 秒）。 |
-| `tpmLimit` | `1200000` | TPM 限制。默认匹配阿里云百炼 deepseek-v4-flash。 |
-| `rpmLimit` | `15000` | RPM 限制。 |
-| `safetyFactor` | `0.8` | 安全系数（0.8 = 使用 80% 限额，预留 20% 缓冲）。 |
-| `verbose` | `false` | 启用后输出每次请求的延迟和令牌记录日志。 |
+| 键 | 类型 | 默认 | 说明 |
+|---|---|:---:|---|
+| `windowMs` | number | `60000` | 滑动窗口大小（毫秒）。默认 60 秒，与供应商的 TPM/RPM 统计周期一致，一般不用改 |
+| `tpmLimit` | number | `1200000` | 每分钟令牌上限。默认匹配阿里云百炼 deepseek-v4-flash |
+| `rpmLimit` | number | `15000` | 每分钟请求数上限 |
+| `safetyFactor` | number | `0.8` | 安全系数。**实际生效上限 = `tpmLimit × safetyFactor`**，默认只用 80% 配额，留 20% 缓冲 |
+| `verbose` | boolean | `false` | 输出每次请求的延迟与令牌记录日志，排查问题时打开 |
 
 ## 查看状态
 
-在聊天输入框输入 `/agent-rate-limit`：
+`/agent-rate-limit` 会打印当前配置与窗口占用：
 
 ```
 Status: loaded
 Config:
-  TPM limit:     1,200,000 (effective: 959,968)
+  TPM limit:     1,200,000 (effective: 960,000)
   RPM limit:     15,000
   Safety factor: 0.8
   Window:        60s
@@ -65,50 +85,36 @@ Current:
   Current TPM:     14,765
 ```
 
-## 工作原理
+`Window entries` 是当前 60 秒窗口内的请求数，`Current TPM` 是窗口内累计令牌数。两者都远低于限额时，插件不会产生任何延迟。
 
-### 令牌追踪
+## 它会怎么干预你的请求
 
-1. **记录令牌数**：每次成功调用后，插件从 API 的 `usage` 数据块中记录精确的令牌消耗，**包含缓存命中**（`cacheReadTokens`/`cacheWriteTokens`），以匹配 API 账单总额。
-2. **滑动窗口**：60 秒 FIFO 队列记录最近令牌消耗。每次请求前检查窗口是否接近 TPM/RPM 上限，必要时延迟。
-3. **输入估算**：取最近 3 次 API 实际输入令牌数的平均值作为估算。仅首次请求使用启发式估算。
+- **只延迟，不拒绝**：插件永远不会让请求失败，也不会返回错误，只在必要时等待
+- **有余量就放行**：窗口内累计令牌加上本次预估输入仍低于生效上限时，延迟为 `0`
+- **接近上限才排队**：等待到足够的旧记录滑出窗口、腾出空间为止
+- **并发时自动延长**：多个 Agent 同时请求时，你的等待期间其他 Agent 仍在消耗配额，插件按超限比例放大延迟
+- **失败的请求不占额度**：以 `error` / `aborted` 结束的流不计入窗口，重试不会被自己拖慢
+- **延迟发生在下发之前**：等待加在流开始之前，不会打断已经开始输出的响应
 
-日志示例：
+## 已知限制（实测确认）
 
-```
-Recorded 113190 tokens (uncached: 1322, cached: 111616, output: 252)
-```
+- **按进程独立计数**：窗口状态存在 DSH 进程内，多个 DSH 实例互不共享——同时跑多个 profile 时，每个实例都按完整配额独立计算，合计仍可能超限。
+- **配置对 provider 是全局的**：一份配置作用于该插件实例下的所有 provider，无法给不同 provider 设不同限额。
+- **首次请求只能估算**：窗口为空时没有历史数据，输入令牌数按启发式估算；之后改用最近 3 次 API 实际值的平均。
+- **单次超大请求无法拆分**：如果一次请求本身就接近配额，插件只能等它滑出窗口，不能把它切开。
+- **不保证不撞限速**：插件的目标是大幅降低概率，而不是数学保证。配额被其它程序同时消耗时仍可能触发 429——那部分由 DSH 内置的重试机制接管。
 
-### 延迟算法
+## 给 Agent 的要点
 
-当窗口接近 TPM 上限时，插件计算需要等待多久让足够多的旧条目过期。算法从**最新条目**开始往前遍历，找到「保留最新条目，丢弃最旧条目」的切分点，确保延迟后排空到限额以下。
+- 本插件**没有工具、没有模型可见的接口**，对模型完全透明，无需也无法主动调用
+- 速率限制是自动生效的：撞到限额时表现为**响应变慢**，而不是报错
+- 判断是否生效：请用户输入 `/agent-rate-limit`，出现 `Status: loaded` 即为已加载
+- 配置文件是 `~/.dsh/profiles/web/cordis.patch.yml`，任何改动都要**重启 DSH** 才生效
 
-多 Agent 并发时，单个 Agent 的等待期间其他 Agent 仍在添加令牌。插件根据当前 TPM 超限比例自动延长等待时间：
+## 兼容性
 
-```
-Delaying 6854ms (TPM: 977031/960000 ×1.02, RPM: 12/15000, ...)  ← 轻微超限，几乎不变
-Delaying 6982ms (TPM: 1759784/960000 ×1.83, RPM: 16/15000, ...)  ← 超限 83%，延迟加长 83%
-```
+在 **DSH v0.1.5-rc.1**（2026-09）下测试通过。
 
-## 开发
+## 许可证
 
-```powershell
-pnpm install        # 安装开发依赖
-pnpm run typecheck  # 类型检查
-pnpm run build      # 编译到 lib/
-pnpm test           # 执行 lib/ 产物
-```
-
-**每次修改 `src/index.ts` 后必须运行 `pnpm run build`，并把 `lib/` 一并提交。**
-
-`pnpm test` 不是可选项。`tsc` 只做类型检查与转译，漂移检查只看 git 状态——**没有任何一步执行过产物**。于是「模块在 import 时抛错」（导入了宿主已删除的符号、在顶层解构了 `undefined`）可以一路绿灯，直到用户重启 DSH 才在启动日志里爆出来。测试直接 `import` 编译产物，用模拟 ctx 走一遍加载、事件注册、流包装与窗口记账。
-
-`dsh plugin add github:...` 只接收仓库中已被 git 跟踪的文件。本仓库直接提交编译产物，而不是在安装时构建，所以 `lib/` 必须与源码保持同步；否则从 GitHub 安装的插件会静默地运行旧代码，不会有任何报错提示。
-
-不要添加 `prepare` 脚本。git 托管的包会在安装时执行它，而 pnpm 默认拦截依赖的构建脚本，这会让 `dsh plugin add` 直接失败，直到用户手动在 profile 的 `pnpm-workspace.yaml` 中放行。
-
-## Credits
-
-Built for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
-
-Tested with DSH v0.1.5-rc.1.
+MIT
