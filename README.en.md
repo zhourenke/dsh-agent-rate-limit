@@ -49,7 +49,7 @@ To change the limits, edit `~/.dsh/profiles/web/cordis.patch.yml`:
     verbose: true
 ```
 
-The `id` must be `agent-rate-limit`: the bundle already inserted that entry, so what you write is a **config override for the same id**. **Do not wrap it in `- insert:`** — that is the form the bundle patch inside the package uses (its job is to add the entry), and using it here inserts a **second instance**, making the rate limit count twice.
+The `id` must be `agent-rate-limit`: the bundle already inserted that entry, so what you write is a **config override for the same id**. **Do not wrap it in `- insert:`** — `insert` is the "append a row unconditionally" action, and using it here inserts a **second instance**, making the rate limit count twice.
 
 **Saving the file is enough; no restart is needed.** The web profile's patch layer is hot-reloaded (`patchReload: live`, re-applied by Cordis HMR when the file changes). Note the distinction: **installing or removing the plugin itself still requires a restart**, because the bundle list is fixed when the process starts.
 

@@ -49,7 +49,7 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
     verbose: true
 ```
 
-`id` 必须是 `agent-rate-limit`：bundle 已经插入了这个条目，你写的是**同 id 的配置覆盖**。**不要再包一层 `- insert:`**——那是包内 bundle patch 的写法（负责"新增这个条目"），写进 profile 会插入**第二个实例**，速率限制随之算两遍。
+`id` 必须是 `agent-rate-limit`：bundle 已经插入了这个条目，你写的是**同 id 的配置覆盖**。**不要再包一层 `- insert:`**——`insert` 是"无条件追加一行"的动作，写在这里会插入**第二个实例**，速率限制随之算两遍。
 
 **保存即生效，不需要重启。** web profile 的补丁层是热重载的（`patchReload: live`，由 Cordis HMR 监视文件变更后重新应用）。注意区分：**安装或卸载插件本身仍然必须重启**，因为 bundle 列表在进程启动时就已经确定。
 
