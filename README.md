@@ -40,6 +40,7 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 要调整限额，编辑 `~/.dsh/profiles/web/cordis.patch.yml`：
 
 ```yaml
+# ~/.dsh/profiles/web/cordis.patch.yml
 - id: agent-rate-limit
   name: '@zhourenke/dsh-agent-rate-limit'
   config:

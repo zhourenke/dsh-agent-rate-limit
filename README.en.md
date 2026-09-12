@@ -40,6 +40,7 @@ Seeing `Status: loaded` means it is loaded and working.
 To change the limits, edit `~/.dsh/profiles/web/cordis.patch.yml`:
 
 ```yaml
+# ~/.dsh/profiles/web/cordis.patch.yml
 - id: agent-rate-limit
   name: '@zhourenke/dsh-agent-rate-limit'
   config:
