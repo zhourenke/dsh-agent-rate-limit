@@ -19,7 +19,7 @@ A DSH agent loop can fire several requests within seconds and easily hit a provi
 dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 ```
 
-**DSH must be restarted for this to take effect** — the plugin is loaded by the loader at process start, so refreshing the page does nothing.
+**DSH must be restarted for this to take effect** — the new bundle is only loaded when the process starts, so refreshing the page does nothing. (Adjusting its configuration *after* installing does not require a restart; see Quick start.)
 
 To uninstall:
 
@@ -40,16 +40,17 @@ Seeing `Status: loaded` means it is loaded and working.
 To change the limits, edit `~/.dsh/profiles/web/cordis.patch.yml`:
 
 ```yaml
-- insert:
-    - id: agent-rate-limit
-      name: '@zhourenke/dsh-agent-rate-limit'
-      config:
-        tpmLimit: 1200000
-        rpmLimit: 15000
-        verbose: true
+- id: agent-rate-limit
+  name: '@zhourenke/dsh-agent-rate-limit'
+  config:
+    tpmLimit: 1200000
+    rpmLimit: 15000
+    verbose: true
 ```
 
-Restart DSH after any change here as well.
+The `id` must be `agent-rate-limit`: the bundle already inserted that entry, so what you write is a **config override for the same id**. **Do not wrap it in `- insert:`** — that is the form the bundle patch inside the package uses (its job is to add the entry), and using it here inserts a **second instance**, making the rate limit count twice.
+
+**Saving the file is enough; no restart is needed.** The web profile's patch layer is hot-reloaded (`patchReload: live`, re-applied by Cordis HMR when the file changes). Note the distinction: **installing or removing the plugin itself still requires a restart**, because the bundle list is fixed when the process starts.
 
 ## Configuration
 
@@ -102,7 +103,7 @@ Current:
 - This plugin has **no tool and no model-visible interface**; it is entirely transparent to the model and cannot be invoked or controlled by it
 - Rate limiting is automatic: hitting the ceiling shows up as a **slower response**, never as an error
 - To check whether it is live, ask the user to run `/agent-rate-limit`; `Status: loaded` means it is loaded
-- The configuration file is `~/.dsh/profiles/web/cordis.patch.yml` and any change there requires a **DSH restart**
+- The configuration file is `~/.dsh/profiles/web/cordis.patch.yml`; editing it takes effect **as soon as it is saved, with no restart** (the patch layer is hot-reloaded). Only installing or removing the plugin itself requires a restart
 
 ## Compatibility
 

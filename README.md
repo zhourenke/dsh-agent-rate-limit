@@ -19,7 +19,7 @@ DSH 的 Agent 循环能在几十秒内连续发出多个请求，很容易撞上
 dsh plugin --profile web add "github:zhourenke/dsh-agent-rate-limit"
 ```
 
-**必须重启 DSH 才会生效**——插件由 loader 在进程启动时加载，刷新页面无效。
+**必须重启 DSH 才会生效**——新增的 bundle 在进程启动时才载入，刷新页面无效。（装好之后再调整它的配置则不需要重启，见下文「快速上手」。）
 
 卸载：
 
@@ -40,16 +40,17 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 要调整限额，编辑 `~/.dsh/profiles/web/cordis.patch.yml`：
 
 ```yaml
-- insert:
-    - id: agent-rate-limit
-      name: '@zhourenke/dsh-agent-rate-limit'
-      config:
-        tpmLimit: 1200000
-        rpmLimit: 15000
-        verbose: true
+- id: agent-rate-limit
+  name: '@zhourenke/dsh-agent-rate-limit'
+  config:
+    tpmLimit: 1200000
+    rpmLimit: 15000
+    verbose: true
 ```
 
-改完同样需要重启 DSH。
+`id` 必须是 `agent-rate-limit`：bundle 已经插入了这个条目，你写的是**同 id 的配置覆盖**。**不要再包一层 `- insert:`**——那是包内 bundle patch 的写法（负责"新增这个条目"），写进 profile 会插入**第二个实例**，速率限制随之算两遍。
+
+**保存即生效，不需要重启。** web profile 的补丁层是热重载的（`patchReload: live`，由 Cordis HMR 监视文件变更后重新应用）。注意区分：**安装或卸载插件本身仍然必须重启**，因为 bundle 列表在进程启动时就已经确定。
 
 ## 配置
 
@@ -102,7 +103,7 @@ Current:
 - 本插件**没有工具、没有模型可见的接口**，对模型完全透明，无需也无法主动调用
 - 速率限制是自动生效的：撞到限额时表现为**响应变慢**，而不是报错
 - 判断是否生效：请用户输入 `/agent-rate-limit`，出现 `Status: loaded` 即为已加载
-- 配置文件是 `~/.dsh/profiles/web/cordis.patch.yml`，任何改动都要**重启 DSH** 才生效
+- 配置文件是 `~/.dsh/profiles/web/cordis.patch.yml`；改它**保存即生效，不需要重启**（补丁层热重载）。只有安装/卸载插件本身才需要重启
 
 ## 兼容性
 
