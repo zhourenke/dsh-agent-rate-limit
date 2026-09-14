@@ -1,14 +1,15 @@
 /**
  * Execution test for the host-side artifact.
  *
- * PLUGIN_RELEASE_GUIDE.md §4 step 6 requires this: `tsc` only type-checks and
+ * PLUGIN_RELEASE_GUIDE.md "提交前验证清单" step 6 requires this: `tsc` only type-checks and
  * transpiles, and the drift check only inspects git state — neither one ever
  * EXECUTES lib/index.js. Without this, "the module throws on import" (importing
  * a symbol the host removed, destructuring undefined at module scope, pulling a
  * package that no longer exists) stays green through every other check and only
  * surfaces when the user restarts DSH and reads the startup log.
  *
- * Run with: node --test test/
+ * Run with: node --test   (bare form only — `node --test test/` fails with
+ * MODULE_NOT_FOUND, and a `test/*.test.mjs` glob would silently miss subdirs)
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
