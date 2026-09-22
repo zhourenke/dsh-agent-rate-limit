@@ -193,10 +193,12 @@ test('countFailedAttempts: false keeps failed usage out of the window but still 
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 0, tpm: 0 })
   const record = logs.find((line) => line.includes('Recorded 399195 tokens'))
   assert.ok(record, `a failed attempt must still be logged, got:\n${logs.join('\n')}`)
-  // The detail paragraph keeps the original three-part form; the failure marker
-  // is a trailing annotation, so existing log readers lose nothing.
-  assert.match(record, /uncached: 187803, cached: 209280, output: 2112/)
-  assert.match(record, /\[failed\/error, not counted\]/)
+  // The record keeps its original three-part detail; only the finish reason is
+  // appended as a trailing annotation.
+  assert.match(
+    record,
+    /^\[agent-rate-limit\] Recorded 399195 tokens \(uncached: 187803, cached: 209280, output: 2112\) \[error\]$/,
+  )
 })
 
 test('a failed attempt without any usage chunk records nothing and says so', async () => {
@@ -213,7 +215,7 @@ test('a failed attempt without any usage chunk records nothing and says so', asy
 
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 0, tpm: 0 })
   assert.ok(
-    logs.some((line) => line.includes('No usage reported')),
+    logs.includes('[agent-rate-limit] No usage reported [error]'),
     `expected an explicit no-usage notice, got:\n${logs.join('\n')}`,
   )
 })
@@ -269,7 +271,7 @@ test('verbose logs keep the original record format', async () => {
   assert.ok(record, `expected a record line, got:\n${logs.join('\n')}`)
   // The original line shape, unchanged: `Recorded N tokens (uncached: …, cached: …, output: …)`.
   assert.match(record, /^\[agent-rate-limit\] Recorded 200 tokens \(uncached: 100, cached: 50, output: 50\)$/)
-  assert.ok(!record.includes('failed/'), 'a successful attempt carries no failure marker')
+  assert.ok(!/\[[^\]]+\]$/.test(record), 'a successful attempt carries no trailing marker')
 })
 
 test('a wire totalTokens mismatch is reported instead of silently skewing the window', async () => {
@@ -288,7 +290,9 @@ test('a wire totalTokens mismatch is reported instead of silently skewing the wi
   )
 
   assert.ok(
-    logs.some((line) => line.includes('Recorded total mismatch')),
+    logs.includes(
+      '[agent-rate-limit] Recorded total mismatch (computed: 15, reported: 999, uncached: 10, cached: 0, output: 5)',
+    ),
     `expected a drift warning, got:\n${logs.join('\n')}`,
   )
   // The parts still win: the window keeps the recombined billed total.

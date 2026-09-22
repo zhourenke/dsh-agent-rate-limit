@@ -450,9 +450,9 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
         verbose
       ) {
         console.log(
-          `[agent-rate-limit] Recorded total mismatch: parts=${actualInputTokens + actualOutputTokens} ` +
-            `wire.totalTokens=${wireTotal} (uncached=${usageUncached}, cacheReadTokens=${usageCachedRead}, ` +
-            `cacheWriteTokens=${usageCachedWrite}, outputTokens=${actualOutputTokens})`,
+          `[agent-rate-limit] Recorded total mismatch (computed: ${actualInputTokens + actualOutputTokens}, ` +
+            `reported: ${wireTotal}, uncached: ${usageUncached}, ` +
+            `cached: ${usageCachedRead + usageCachedWrite}, output: ${actualOutputTokens})`,
         )
       }
 
@@ -485,11 +485,11 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
           console.log(
             `[agent-rate-limit] Recorded ${totalTokens} tokens (uncached: ${usageUncached}, ` +
               `cached: ${usageCachedRead + usageCachedWrite}, output: ${actualOutputTokens}) ` +
-              `[failed/${finishReason}, ${counted ? 'counted' : 'not counted'}]`,
+              `[${finishReason}]`,
           )
         }
       } else if (verbose) {
-        console.log(`[agent-rate-limit] No usage reported (failed/${finishReason}) — nothing recorded`)
+        console.log(`[agent-rate-limit] No usage reported [${finishReason}]`)
       }
     })()
 
