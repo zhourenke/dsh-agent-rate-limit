@@ -49,7 +49,7 @@ To change the limits, edit `~/.dsh/profiles/web/cordis.patch.yml`:
     verbose: true
 ```
 
-The `id` must be `agent-rate-limit`: the bundle already inserted that entry, so what you write is a **config override for the same id**. **Do not wrap it in `- insert:`** — `insert` is the "append a row unconditionally" action, and using it here inserts a **second instance**, making the rate limit count twice.
+Keep the `id` and `name` lines exactly as written; do not rename them.
 
 **Saving the file is enough; no restart is needed.** The web profile's patch layer is hot-reloaded (`patchReload: live`, re-applied by Cordis HMR when the file changes). Note the distinction: **installing or removing the plugin itself still requires a restart**, because the bundle list is fixed when the process starts.
 
@@ -58,7 +58,7 @@ The `id` must be `agent-rate-limit`: the bundle already inserted that entry, so 
 | Key | Type | Default | Description |
 |---|---|:---:|---|
 | `windowMs` | number | `60000` | Sliding window size in milliseconds. 60s matches the provider's TPM/RPM accounting period; rarely needs changing |
-| `tpmLimit` | number | `1200000` | Tokens-per-minute ceiling. The default matches Alibaba Cloud Bailian deepseek-v4-flash |
+| `tpmLimit` | number | `1200000` | Tokens-per-minute ceiling. The default targets a common high-throughput tier |
 | `rpmLimit` | number | `15000` | Requests-per-minute ceiling |
 | `safetyFactor` | number | `0.8` | Safety factor. **The effective ceiling is `tpmLimit × safetyFactor`**, so by default only 80% of the quota is used, leaving a 20% buffer |
 | `countFailedAttempts` | boolean | `true` | Whether attempts that end in `error` / `aborted` but did report usage still count toward the window. The upstream did process and bill that prompt, so excluding it understates window pressure; disable to restore "failed attempts consume no budget". **Failed attempts are logged either way** |

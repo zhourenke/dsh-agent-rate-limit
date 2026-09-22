@@ -49,7 +49,7 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
     verbose: true
 ```
 
-`id` 必须是 `agent-rate-limit`：bundle 已经插入了这个条目，你写的是**同 id 的配置覆盖**。**不要再包一层 `- insert:`**——`insert` 是"无条件追加一行"的动作，写在这里会插入**第二个实例**，速率限制随之算两遍。
+`id` 与 `name` 两行请照抄，不要改名。
 
 **保存即生效，不需要重启。** web profile 的补丁层是热重载的（`patchReload: live`，由 Cordis HMR 监视文件变更后重新应用）。注意区分：**安装或卸载插件本身仍然必须重启**，因为 bundle 列表在进程启动时就已经确定。
 
@@ -58,7 +58,7 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 | 键 | 类型 | 默认 | 说明 |
 |---|---|:---:|---|
 | `windowMs` | number | `60000` | 滑动窗口大小（毫秒）。默认 60 秒，与供应商的 TPM/RPM 统计周期一致，一般不用改 |
-| `tpmLimit` | number | `1200000` | 每分钟令牌上限。默认匹配阿里云百炼 deepseek-v4-flash |
+| `tpmLimit` | number | `1200000` | 每分钟令牌上限。默认值适配常见的高吞吐配额档位 |
 | `rpmLimit` | number | `15000` | 每分钟请求数上限 |
 | `safetyFactor` | number | `0.8` | 安全系数。**实际生效上限 = `tpmLimit × safetyFactor`**，默认只用 80% 配额，留 20% 缓冲 |
 | `countFailedAttempts` | boolean | `true` | 以 `error` / `aborted` 结束、但上游已回报用量的尝试是否计入窗口。上游确实处理并计费了那一次 prompt，不计会低估窗口压力；关掉可恢复"失败不占额度"。**无论开关如何，失败尝试都会打印日志** |

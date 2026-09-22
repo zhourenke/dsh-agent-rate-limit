@@ -22,7 +22,7 @@ import z from '@deepseek-ai/schemastery'
 /** Default sliding window size in milliseconds (60 seconds). */
 const DEFAULT_WINDOW_MS = 60_000
 
-/** Default TPM (Tokens Per Minute) limit for Alibaba Cloud Bailian deepseek-v4-flash. */
+/** Default TPM (Tokens Per Minute) limit, matching a common high-throughput tier. */
 const DEFAULT_TPM_LIMIT = 1_200_000
 
 /** Default RPM (Requests Per Minute) limit. */
@@ -307,8 +307,14 @@ interface CommandDefinition {
  * packages while still type-checking every call site.
  */
 interface PluginContext {
-  /** Subscribe to a Waterfall event. */
-  on(name: string, handler: (options: unknown, next: () => AsyncIterable<unknown>) => unknown): void
+  /**
+   * Subscribe to a Waterfall event.
+   *
+   * The event name is spelled as a literal type rather than `string`: a typo
+   * in `'llm/stream'` must fail `tsc` instead of silently subscribing to an
+   * event that never fires.
+   */
+  on(name: 'llm/stream', handler: (options: unknown, next: () => AsyncIterable<unknown>) => unknown): void
   /**
    * Register a lifecycle effect, disposed together with the plugin.
    *

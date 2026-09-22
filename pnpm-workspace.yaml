@@ -2,7 +2,6 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-agent@0.1.5-rc.1'
   - '@deepseek-ai/dsh-brand@0.1.5-rc.1'
   - '@deepseek-ai/dsh-invariants@0.1.5-rc.1'
-  - '@deepseek-ai/dsh-llm-retry@0.1.5-rc.1'
   - '@deepseek-ai/dsh-llm@0.1.5-rc.1'
   - '@deepseek-ai/dsh-scope@0.1.5-rc.1'
   - '@deepseek-ai/dsh-session-projection@0.1.5-rc.1'

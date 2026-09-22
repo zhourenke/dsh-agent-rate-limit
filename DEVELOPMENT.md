@@ -27,6 +27,8 @@ pnpm test           # 先构建，再执行 lib/ 产物
 
 `test` 脚本写作 `"pnpm run build && node --test"`，两点都不能省：`node --test` 不带参数才会递归发现全部测试文件（`node --test test` 与 `node --test test/` 在 Node 25 下都报 `MODULE_NOT_FOUND`）；串上构建则保证执行的永远是源码当前编译出的产物，而不是上一次的残留。
 
+`tsconfig.json` 开启了 `noUnusedLocals` 与 `noUnusedParameters`：它们是"移除冗余逻辑"唯一能自动化的判据，未使用的局部变量与参数会在 `typecheck` 阶段直接报 TS6133。开启前用 `npx tsc --noEmit --noUnusedLocals --noUnusedParameters` 探测过，零告警。有意不用的参数改成 `_` 前缀即可豁免这条规则。
+
 ## 开发挂载：让 DSH 加载你改的代码
 
 用目录连接点把插件挂进 profile 的 `node_modules`，改完 `pnpm run build` 再重启即可，不必每次重新安装：
@@ -41,6 +43,17 @@ New-Item -ItemType Junction -Path "$prof\node_modules\@zhourenke\dsh-agent-rate-
 **改配置不需要重启，改代码才需要。** profile 的补丁层是热重载的（`patchReload: live`，由 Cordis HMR 监视，见 `PLUGIN_RELEASE_GUIDE.md`「发布与生效」）：编辑 `~/.dsh/profiles/web/cordis.patch.yml` 里的 `config:` 保存即生效，调参时不必反复重启。但 `lib/` 的变更**必须重启**才会重新加载——热重载重组的只是补丁层，bundle 与模块在进程启动时就已确定。
 
 注意连接点挂载的插件**无法用 `dsh plugin remove` 卸载**（它不在 profile 的 `dependencies` 里），需要手工删连接点再摘掉 `dsh.profile.bundles` 条目。
+
+## 配置面：包内 patch 与 profile patch
+
+两份文件同名、同 schema，也可能写着同一对 `id`/`name`，**区别不在文件而在条目用了哪个动作**：
+
+- **包内 `cordis.patch.yml`** 用 `- insert:`，把插件行插进 profile 层——这是插件被识别为 profile 层条目的唯一开关。
+- **`<profile>/cordis.patch.yml`** 是用户的补丁层，用 `- id:` 直挂**同 id 覆盖**已有条目的 `config:`。**不要在这里写 `- insert:`**：`insert` 是"无条件追加一行"的动作，写在这里不会报错，而是追加**第二个同 id 实例**，速率限制随之算两遍。
+
+`id` 应与插件导出的 `name` 一致（本仓库为 `agent-rate-limit`），便于诊断。README 只展示可直接照抄的配置片段，上面这段机制说明留在本文档。
+
+判据与实测：`PLUGIN_RELEASE_GUIDE.md`「发布与生效」、分册 `guide/installation-and-profile.md`。
 
 ## 实现要点（为什么这样做）
 
@@ -114,6 +127,10 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 
 `CommandResult` 在 `@deepseek-ai/dsh-commands` 里是 `{ kind: 'success'; text?: string } | { kind: 'error'; text: string }`，本地声明**不能**图省事写成 `kind: string`——那样拼错 `kind` 能通过 `tsc`，却会在宿主注册边界抛 `handler must return a CommandResult`，直到用户第一次敲命令才暴露。
 
+同理，`PluginContext.on` 的签名把事件名写成字面量：`on(name: 'llm/stream', …)`，而不是 `name: string`。写成 `string` 时事件名打错照样通过 `tsc`，而订阅一个不存在的事件是**静默失效**——不报错，只是插件再也不触发。
+
+**代价**：这些接口是本地写的形状，不是从宿主包推导出来的，因此宿主 API 漂移不会让 `tsc` 报错。这也是「运行时依赖」一节末尾那条复核纪律的理由——升级 DSH 后要连同签名一起核对，不能只看符号是否存在。
+
 ## 测试要点
 
 - 直接 `import '../lib/index.js'`，断言模块契约（`name` / `inject` / `apply` / `Config`）
@@ -124,7 +141,7 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 - 用 `captureLogs()` 抓 `console.log` 断言日志形态：成功行**逐字**等于原格式 `Recorded N tokens (uncached: …, cached: …, output: …)` 且无尾标记，失败行在其后追加 `[<原因>]`，无 usage 的失败整行等于 `No usage reported [<原因>]`
 - 覆盖 `totalTokens` 与分项不一致时打印 `Recorded total mismatch (computed: …, reported: …)`，且窗口仍取分项之和
 - 覆盖超限路径，确认真的走到了 `ctx.timer.timeout(`
-- 模块级状态由 `apply` 内的 `initRateLimiter()` 重置，因此多次 `apply` 之间天然隔离（`streamCounter` 例外：它是纯诊断序号，跨 `apply` 保持单调，热重载后也不会重号）
+- 模块级状态由 `apply` 内的 `initRateLimiter()` 重置，因此多次 `apply` 之间天然隔离
 
 ## 发布纪律
 
@@ -140,11 +157,12 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 | 包 | 版本 | 用途 |
 |---|---|---|
 | `@deepseek-ai/cordis` | `^4.0.2` | 插件框架（走自己的版本线） |
-| `@deepseek-ai/dsh-llm` | `^0.1.5-rc.1` | `llm/stream` 接口 |
-| `@deepseek-ai/dsh-llm-retry` | `^0.1.5-rc.1` | 重试（本插件不再自行实现） |
+| `@deepseek-ai/dsh-llm` | `^0.1.5-rc.1` | `llm/stream` 事件契约的宿主方。**兼容性声明，源码并不 import 它** |
 | `@deepseek-ai/schemastery` | `^3.18.1` | 配置校验，**唯一真实的 `dependencies`** |
 
-`devDependencies` 中的三个宿主包**钉死到精确版本**（`4.0.2` / `0.1.5-rc.1` / `0.1.5-rc.1`）：连接点安装时插件解析到的是自己 `node_modules` 里的副本，写范围就会对着与线上不同的宿主做类型检查与测试。
+`devDependencies` 中的两个宿主包**钉死到精确版本**（`4.0.2` / `0.1.5-rc.1`）：连接点安装时插件解析到的是自己 `node_modules` 里的副本，写范围就会对着与线上不同的宿主做类型检查与测试。
+
+**没有 `@deepseek-ai/dsh-llm-retry` 的声明。** 重试由宿主的那个插件负责，本插件既不监听 `agent/request-error` 也不 import 它——声明一个代码从不接触的 peer 只会让声明与实现不一致。
 
 DSH 升级后按 `PLUGIN_RELEASE_GUIDE.md`「DSH 升级后的复核」重新核对事件名、宿主符号与 peer 范围。
 
