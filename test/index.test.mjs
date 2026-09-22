@@ -193,12 +193,10 @@ test('countFailedAttempts: false keeps failed usage out of the window but still 
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 0, tpm: 0 })
   const record = logs.find((line) => line.includes('Recorded 399195 tokens'))
   assert.ok(record, `a failed attempt must still be logged, got:\n${logs.join('\n')}`)
-  assert.match(record, /failed\/error/)
-  assert.match(record, /not counted/)
-  assert.match(record, /uncached: 187803/)
-  // uncached + cached must be visible as the prompt total, so the next reader
-  // cannot mistake a fully-cached prompt for missing data.
-  assert.match(record, /cached: 209280 \(= prompt 397083\)/)
+  // The detail paragraph keeps the original three-part form; the failure marker
+  // is a trailing annotation, so existing log readers lose nothing.
+  assert.match(record, /uncached: 187803, cached: 209280, output: 2112/)
+  assert.match(record, /\[failed\/error, not counted\]/)
 })
 
 test('a failed attempt without any usage chunk records nothing and says so', async () => {
@@ -215,7 +213,7 @@ test('a failed attempt without any usage chunk records nothing and says so', asy
 
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 0, tpm: 0 })
   assert.ok(
-    logs.some((line) => line.includes('reported no usage')),
+    logs.some((line) => line.includes('No usage reported')),
     `expected an explicit no-usage notice, got:\n${logs.join('\n')}`,
   )
 })
@@ -249,7 +247,7 @@ test('a failed attempt followed by a successful retry records both attempts', as
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 2, tpm: 15643 })
 })
 
-test('verbose logs carry the attempt serial and the prompt total', async () => {
+test('verbose logs keep the original record format', async () => {
   const { ctx, listeners } = makeCtx()
   await apply(ctx, { verbose: true })
 
@@ -269,10 +267,9 @@ test('verbose logs carry the attempt serial and the prompt total', async () => {
 
   const record = logs.find((line) => line.includes('Recorded 200 tokens'))
   assert.ok(record, `expected a record line, got:\n${logs.join('\n')}`)
-  // The serial is module-level and monotonic across apply() calls, so assert
-  // the shape rather than an absolute number.
-  assert.match(record, /#\d+ session=sess-1/, 'log line carries serial and session')
-  assert.match(record, /uncached: 100, cached: 50 \(= prompt 150\), output: 50/)
+  // The original line shape, unchanged: `Recorded N tokens (uncached: …, cached: …, output: …)`.
+  assert.match(record, /^\[agent-rate-limit\] Recorded 200 tokens \(uncached: 100, cached: 50, output: 50\)$/)
+  assert.ok(!record.includes('failed/'), 'a successful attempt carries no failure marker')
 })
 
 test('a wire totalTokens mismatch is reported instead of silently skewing the window', async () => {
@@ -291,7 +288,7 @@ test('a wire totalTokens mismatch is reported instead of silently skewing the wi
   )
 
   assert.ok(
-    logs.some((line) => line.includes('usage self-check FAILED')),
+    logs.some((line) => line.includes('Recorded total mismatch')),
     `expected a drift warning, got:\n${logs.join('\n')}`,
   )
   // The parts still win: the window keeps the recombined billed total.

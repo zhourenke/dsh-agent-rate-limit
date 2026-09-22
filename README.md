@@ -107,7 +107,7 @@ Current:
 - 速率限制是自动生效的：撞到限额时表现为**响应变慢**，而不是报错
 - 判断是否生效：请用户输入 `/agent-rate-limit`，出现 `Status: loaded` 即为已加载
 - 配置文件是 `~/.dsh/profiles/web/cordis.patch.yml`；改它**保存即生效，不需要重启**（补丁层热重载）。只有安装/卸载插件本身才需要重启
-- **`verbose: true` 的日志可以直接和 DSH 的轮次用量对账**：每行带 `#序号`，失败尝试标 `failed/<原因>`，且 `uncached + cached = prompt` 一眼可验。若两者对不上，先看失败尝试是否被计入、再看上游是否改了 usage 字段——插件遇到 `totalTokens` 与分项不一致会打印 `usage self-check FAILED`
+- **`verbose: true` 的日志可以直接和 DSH 的轮次用量对账**：每行是 `Recorded N tokens (uncached: …, cached: …, output: …)`，失败尝试会多一个 `[failed/<原因>, counted|not counted]` 尾巴。若两者对不上，先确认失败尝试是否出现在日志里（默认会记），再看上游是否改了 usage 字段——插件遇到 `totalTokens` 与分项不一致会打印告警
 
 ## 兼容性
 

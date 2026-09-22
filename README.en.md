@@ -107,7 +107,7 @@ Current:
 - Rate limiting is automatic: hitting the ceiling shows up as a **slower response**, never as an error
 - To check whether it is live, ask the user to run `/agent-rate-limit`; `Status: loaded` means it is loaded
 - The configuration file is `~/.dsh/profiles/web/cordis.patch.yml`; editing it takes effect **as soon as it is saved, with no restart** (the patch layer is hot-reloaded). Only installing or removing the plugin itself requires a restart
-- **`verbose: true` logs reconcile directly against DSH's per-turn usage**: each line carries a `#serial`, failed attempts are marked `failed/<reason>`, and `uncached + cached = prompt` verifies at a glance. If the two disagree, check whether failed attempts are counted, then whether upstream changed its usage fields — the plugin prints `usage self-check FAILED` when `totalTokens` disagrees with its parts
+- **`verbose: true` logs reconcile directly against DSH's per-turn usage**: each line is `Recorded N tokens (uncached: …, cached: …, output: …)`, and a failed attempt carries an extra `[failed/<reason>, counted|not counted]` tail. If the two disagree, check first whether failed attempts appear in the log (they always do now), then whether upstream changed its usage fields — the plugin warns when `totalTokens` disagrees with its parts
 
 ## Compatibility
 

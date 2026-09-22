@@ -79,9 +79,6 @@ let safetyFactor = DEFAULT_SAFETY_FACTOR
 let verbose = DEFAULT_VERBOSE
 let countFailedAttempts = DEFAULT_COUNT_FAILED_ATTEMPTS
 
-/** Monotonic per-process stream counter, used to correlate log lines. */
-let streamCounter = 0
-
 /**
  * Initialize the rate limiter with the given config.
  * @internal
@@ -362,17 +359,9 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
     // Return a wrapped stream that adds delay before the first chunk
     // and counts output tokens
     const wrappedStream = (async function* (): AsyncIterable<unknown> {
-      // A fresh serial per intercepted stream: one stream is one attempt, so
-      // `#N` is what makes a log line traceable across retries. `GenerateOptions`
-      // carries no turn/step, so `sessionId` is the only host-supplied identity
-      // available here (turn/step live in the agent loop's session events).
-      streamCounter += 1
-      const streamSerial = streamCounter
       const now = Date.now()
-      const opts = options as { messages?: Array<{ content?: unknown[] }>; sessionId?: string }
+      const opts = options as { messages?: Array<{ content?: unknown[] }> }
       const messages = opts.messages ?? []
-      const sessionTag =
-        typeof opts.sessionId === 'string' && opts.sessionId.length > 0 ? ` session=${opts.sessionId}` : ''
 
       // Use the average of recent actual input token counts from the API as the
       // estimate for this request — far more accurate than heuristic estimation.
@@ -385,7 +374,7 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
       if (delay > 0) {
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
-        if (verbose) console.log(`[agent-rate-limit] #${streamSerial}${sessionTag} Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
+        if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
         await ctx.timer.timeout(delay)
       }
 
@@ -461,9 +450,8 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
         verbose
       ) {
         console.log(
-          `[agent-rate-limit] #${streamSerial}${sessionTag} usage self-check FAILED: ` +
-            `parts=${actualInputTokens + actualOutputTokens} wire.totalTokens=${wireTotal} ` +
-            `(uncached=${usageUncached}, cacheReadTokens=${usageCachedRead}, ` +
+          `[agent-rate-limit] Recorded total mismatch: parts=${actualInputTokens + actualOutputTokens} ` +
+            `wire.totalTokens=${wireTotal} (uncached=${usageUncached}, cacheReadTokens=${usageCachedRead}, ` +
             `cacheWriteTokens=${usageCachedWrite}, outputTokens=${actualOutputTokens})`,
         )
       }
@@ -475,9 +463,9 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
         addToWindow(totalTokens, recordTime)
         if (verbose) {
           const detail = usageSeen
-            ? `uncached: ${usageUncached}, cached: ${usageCachedRead + usageCachedWrite} (= prompt ${actualInputTokens}), output: ${actualOutputTokens}`
+            ? `uncached: ${usageUncached}, cached: ${usageCachedRead + usageCachedWrite}, output: ${actualOutputTokens}`
             : `estimated: ${estimatedInputTokens}i`
-          console.log(`[agent-rate-limit] #${streamSerial}${sessionTag} Recorded ${totalTokens} tokens (${detail})`)
+          console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${detail})`)
         }
         return
       }
@@ -495,16 +483,13 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
         if (counted) addToWindow(totalTokens, recordTime)
         if (verbose) {
           console.log(
-            `[agent-rate-limit] #${streamSerial}${sessionTag} Recorded ${totalTokens} tokens ` +
-              `(failed/${finishReason}, ${counted ? 'counted' : 'not counted'}, ` +
-              `uncached: ${usageUncached}, cached: ${usageCachedRead + usageCachedWrite} ` +
-              `(= prompt ${actualInputTokens}), output: ${actualOutputTokens})`,
+            `[agent-rate-limit] Recorded ${totalTokens} tokens (uncached: ${usageUncached}, ` +
+              `cached: ${usageCachedRead + usageCachedWrite}, output: ${actualOutputTokens}) ` +
+              `[failed/${finishReason}, ${counted ? 'counted' : 'not counted'}]`,
           )
         }
       } else if (verbose) {
-        console.log(
-          `[agent-rate-limit] #${streamSerial}${sessionTag} Failed attempt (${finishReason}) reported no usage — nothing recorded`,
-        )
+        console.log(`[agent-rate-limit] No usage reported (failed/${finishReason}) — nothing recorded`)
       }
     })()
 

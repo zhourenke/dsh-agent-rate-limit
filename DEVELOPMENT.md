@@ -54,21 +54,28 @@ New-Item -ItemType Junction -Path "$prof\node_modules\@zhourenke\dsh-agent-rate-
 
 更早一版还错在另一半：失败尝试**连同日志一起被丢弃**。结果是插件日志永远无法与 DSH 的轮次统计对账——宿主（`dsh-token-meter`）把 `assistant/attempt` 也算作独立计费的一次，**每一次尝试都计费**；而**失败的那一次通常正是冷缓存的那一次**，整个 prompt 未缓存地送到上游，重试时缓存已热、显示的 `uncached` 为 0。于是"未缓存输入消失了"这个现象，根因就在这行被吞掉的日志里。
 
-现在：`countFailedAttempts` 默认 `true`（上游确实处理并计费了那次 prompt，不计会低估窗口压力），可关；**无论开关如何都打印日志**，并带 `failed/<原因>` 与 `counted` / `not counted` 标记。没有 usage 的失败（请求在产出 usage 前就被拒，例如 429）打印 `reported no usage — nothing recorded`。
+现在：`countFailedAttempts` 默认 `true`（上游确实处理并计费了那次 prompt，不计会低估窗口压力），可关；**无论开关如何都打印日志**，失败行在原格式后追加 `[failed/<原因>, counted|not counted]` 标记。没有 usage 的失败（请求在产出 usage 前就被拒，例如 429）打印 `No usage reported (failed/<原因>) — nothing recorded`。
 
-### 2.1 日志要能和宿主统计对账
+### 2.1 日志格式：保持原有的三段式
 
-每条日志形如：
+成功记录行沿用原格式，**没有**前缀或额外字段：
 
 ```
-[agent-rate-limit] #12 session=<id> Recorded 21459 tokens (uncached: 0, cached: 18944 (= prompt 18944), output: 2515)
-[agent-rate-limit] #13 Recorded 399195 tokens (failed/error, counted, uncached: 187803, cached: 209280 (= prompt 397083), output: 2112)
+[agent-rate-limit] Recorded 21459 tokens (uncached: 0, cached: 18944, output: 2515)
 ```
 
-- **`#N`**：每个被拦截的流入场自增一次，一次流 = 一次尝试，因此重试各占一行
-- **`session=<id>`**：`GenerateOptions` 里**没有** turn/step，`sessionId` 是宿主唯一提供的身份；轮次/步骤号在 agent-loop 的 session 事件里，`llm/stream` 载荷不携带，取不到
-- **`(= prompt N)`**：`uncached + cached == prompt` 一眼可验，避免把「整个 prompt 命中缓存」误读成「丢数」
-- **usage 自检**：`totalTokens` 与分项之和不一致时打印 `usage self-check FAILED` 并附原始字段——上游/中转站改口径时第一时间可见。窗口仍取分项之和
+失败尝试不改这段结构，只在末尾追加一个方括号标记（是否记账、何种失败）：
+
+```
+[agent-rate-limit] Recorded 399195 tokens (uncached: 187803, cached: 209280, output: 2112) [failed/error, not counted]
+```
+
+- **三段式的含义**：`uncached` 是未命中缓存的输入，`cached` 是命中部分（`cacheRead + cacheWrite`），`output` 是产出；三者之和就是计费总额 `totalTokens`
+- **标记是追加的**，所以按老格式解析日志的读者不受影响；`failed/<原因>` 里的原因是 `error` / `aborted`，后者来自 `finish` 数据块
+- **usage 自检**：`totalTokens` 与分项之和不一致时打印 `Recorded total mismatch: parts=… wire.totalTokens=…` 并附原始字段——上游/中转站改口径时第一时间可见。窗口仍取分项之和
+- **宿主统计的对账口径**：宿主把 `assistant/attempt` 也当作独立计费的一次，即**每次尝试都计费**；失败那次通常正是**冷缓存**那次，重试时缓存已热，于是日志里看到 `uncached: 0` 是**真实**的全命中，不是丢数。两者对不上账时先确认失败尝试是否在日志里（现在一定在），再查上游是否改了 usage 字段
+
+**关于尝试标识**：`GenerateOptions` 里**没有** turn/step/attemptId，只有 `sessionId`（轮次号在 agent-loop 的 session 事件里，`llm/stream` 载荷不携带）。因此日志**不输出**轮次或序号——需要逐条对应时按时间顺序与宿主记录比对，或自行在会话记录里对齐。
 
 失败尝试即使不计入窗口，也会**回灌输入估算**（`recentInputTokens`）：重试发的是同一个 prompt，失败那次揭示的真实规模正是下一次估算需要的。
 
@@ -105,9 +112,9 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 - 用模拟 ctx 调一次 `apply`：这是唯一能覆盖事件监听与命令注册路径的办法
 - 覆盖 `finish` 的 `error` / `aborted` 两条分支：**默认计入窗口**，且**必须出现在日志里**；`countFailedAttempts: false` 时只记日志不占窗口
 - 覆盖「失败后重试再成功」：两次尝试都要出现在账上——这是曾经漏掉失败尝试时留下的盲区
-- 覆盖没有 usage 的失败（如请求还没产出 usage 就被拒），确认提示 `reported no usage` 而不是静默
-- 用 `captureLogs()` 抓 `console.log` 断言日志形态：`#序号`、`session=`、`failed/<原因>`、`uncached + cached (= prompt N)`
-- 覆盖 `totalTokens` 与分项不一致时打印 `usage self-check FAILED`，且窗口仍取分项之和
+- 覆盖没有 usage 的失败（如请求还没产出 usage 就被拒），确认提示 `No usage reported` 而不是静默
+- 用 `captureLogs()` 抓 `console.log` 断言日志形态：成功行**逐字**等于原格式 `Recorded N tokens (uncached: …, cached: …, output: …)`，失败行在其后追加 `[failed/<原因>, counted|not counted]`
+- 覆盖 `totalTokens` 与分项不一致时打印 `Recorded total mismatch`，且窗口仍取分项之和
 - 覆盖超限路径，确认真的走到了 `ctx.timer.timeout(`
 - 模块级状态由 `apply` 内的 `initRateLimiter()` 重置，因此多次 `apply` 之间天然隔离（`streamCounter` 例外：它是纯诊断序号，跨 `apply` 保持单调，热重载后也不会重号）
 
