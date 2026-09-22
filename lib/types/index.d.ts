@@ -23,6 +23,13 @@ declare const DEFAULT_RPM_LIMIT = 15000;
 declare const DEFAULT_SAFETY_FACTOR = 0.8;
 /** Default: verbose logging (false = only log startup and critical errors). */
 declare const DEFAULT_VERBOSE = false;
+/**
+ * Default: count failed/aborted attempts into the window when the stream
+ * reported actual usage. The upstream has already processed and billed the
+ * prompt, so excluding it would understate window pressure. Failed attempts
+ * are logged either way.
+ */
+declare const DEFAULT_COUNT_FAILED_ATTEMPTS = true;
 /** Cordis plugin name used by loader diagnostics. */
 declare const name = "agent-rate-limit";
 /** Hard dependency on the timer service and commands service. */
@@ -34,12 +41,14 @@ declare const Config: z<Schemastery.ObjectS<{
     rpmLimit: z<number, number>;
     safetyFactor: z<number, number>;
     verbose: z<boolean, boolean>;
+    countFailedAttempts: z<boolean, boolean>;
 }>, Schemastery.ObjectT<{
     windowMs: z<number, number>;
     tpmLimit: z<number, number>;
     rpmLimit: z<number, number>;
     safetyFactor: z<number, number>;
     verbose: z<boolean, boolean>;
+    countFailedAttempts: z<boolean, boolean>;
 }>>;
 /**
  * The rendered outcome a command handler returns.
@@ -101,4 +110,4 @@ interface PluginContext {
  */
 declare function apply(ctx: PluginContext, config: Record<string, unknown>): Promise<void>;
 export { apply, Config, inject, name };
-export { DEFAULT_WINDOW_MS, DEFAULT_TPM_LIMIT, DEFAULT_RPM_LIMIT, DEFAULT_SAFETY_FACTOR, DEFAULT_VERBOSE, };
+export { DEFAULT_WINDOW_MS, DEFAULT_TPM_LIMIT, DEFAULT_RPM_LIMIT, DEFAULT_SAFETY_FACTOR, DEFAULT_VERBOSE, DEFAULT_COUNT_FAILED_ATTEMPTS, };

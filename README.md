@@ -61,6 +61,7 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 | `tpmLimit` | number | `1200000` | 每分钟令牌上限。默认匹配阿里云百炼 deepseek-v4-flash |
 | `rpmLimit` | number | `15000` | 每分钟请求数上限 |
 | `safetyFactor` | number | `0.8` | 安全系数。**实际生效上限 = `tpmLimit × safetyFactor`**，默认只用 80% 配额，留 20% 缓冲 |
+| `countFailedAttempts` | boolean | `true` | 以 `error` / `aborted` 结束、但上游已回报用量的尝试是否计入窗口。上游确实处理并计费了那一次 prompt，不计会低估窗口压力；关掉可恢复"失败不占额度"。**无论开关如何，失败尝试都会打印日志** |
 | `verbose` | boolean | `false` | 输出每次请求的延迟与令牌记录日志，排查问题时打开 |
 
 ## 查看状态
@@ -75,6 +76,7 @@ Config:
   Safety factor: 0.8
   Window:        60s
   Verbose:       false
+  Count failed:  true
 Current:
   Window entries:  12
   Current TPM:     14,765
@@ -88,7 +90,7 @@ Current:
 - **有余量就放行**：窗口内累计令牌加上本次预估输入仍低于生效上限时，延迟为 `0`
 - **接近上限才排队**：等待到足够的旧记录滑出窗口、腾出空间为止
 - **并发时自动延长**：多个 Agent 同时请求时，你的等待期间其他 Agent 仍在消耗配额，插件按超限比例放大延迟
-- **失败的请求不占额度**：以 `error` / `aborted` 结束的流不计入窗口，重试不会被自己拖慢
+- **失败的尝试照实记账**：以 `error` / `aborted` 结束、但上游已回报用量的尝试**默认计入窗口**（上游已经处理并计费了那一次 prompt），可用 `countFailedAttempts: false` 关掉。两种情况都会打日志，**不会静默吞掉用量**
 - **延迟发生在下发之前**：等待加在流开始之前，不会打断已经开始输出的响应
 
 ## 已知限制（实测确认）
@@ -105,6 +107,7 @@ Current:
 - 速率限制是自动生效的：撞到限额时表现为**响应变慢**，而不是报错
 - 判断是否生效：请用户输入 `/agent-rate-limit`，出现 `Status: loaded` 即为已加载
 - 配置文件是 `~/.dsh/profiles/web/cordis.patch.yml`；改它**保存即生效，不需要重启**（补丁层热重载）。只有安装/卸载插件本身才需要重启
+- **`verbose: true` 的日志可以直接和 DSH 的轮次用量对账**：每行带 `#序号`，失败尝试标 `failed/<原因>`，且 `uncached + cached = prompt` 一眼可验。若两者对不上，先看失败尝试是否被计入、再看上游是否改了 usage 字段——插件遇到 `totalTokens` 与分项不一致会打印 `usage self-check FAILED`
 
 ## 兼容性
 

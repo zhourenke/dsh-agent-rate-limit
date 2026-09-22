@@ -34,6 +34,14 @@ const DEFAULT_SAFETY_FACTOR = 0.8
 /** Default: verbose logging (false = only log startup and critical errors). */
 const DEFAULT_VERBOSE = false
 
+/**
+ * Default: count failed/aborted attempts into the window when the stream
+ * reported actual usage. The upstream has already processed and billed the
+ * prompt, so excluding it would understate window pressure. Failed attempts
+ * are logged either way.
+ */
+const DEFAULT_COUNT_FAILED_ATTEMPTS = true
+
 // ---------------------------------------------------------------------------
 // Sliding window rate limiter
 // ---------------------------------------------------------------------------
@@ -69,6 +77,10 @@ let tpmLimit = DEFAULT_TPM_LIMIT
 let rpmLimit = DEFAULT_RPM_LIMIT
 let safetyFactor = DEFAULT_SAFETY_FACTOR
 let verbose = DEFAULT_VERBOSE
+let countFailedAttempts = DEFAULT_COUNT_FAILED_ATTEMPTS
+
+/** Monotonic per-process stream counter, used to correlate log lines. */
+let streamCounter = 0
 
 /**
  * Initialize the rate limiter with the given config.
@@ -80,12 +92,14 @@ function initRateLimiter(config: {
   rpmLimit: number
   safetyFactor: number
   verbose: boolean
+  countFailedAttempts: boolean
 }): void {
   windowMs = config.windowMs
   tpmLimit = config.tpmLimit
   rpmLimit = config.rpmLimit
   safetyFactor = config.safetyFactor
   verbose = config.verbose
+  countFailedAttempts = config.countFailedAttempts
   windowEntries.length = 0
   recentInputTokens.length = 0
 }
@@ -263,6 +277,7 @@ const Config = z.object({
   rpmLimit: z.number().default(DEFAULT_RPM_LIMIT),
   safetyFactor: z.number().default(DEFAULT_SAFETY_FACTOR),
   verbose: z.boolean().default(DEFAULT_VERBOSE),
+  countFailedAttempts: z.boolean().default(DEFAULT_COUNT_FAILED_ATTEMPTS),
 })
 
 /**
@@ -326,6 +341,9 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
     rpmLimit: Number(config.rpmLimit ?? DEFAULT_RPM_LIMIT),
     safetyFactor: Number(config.safetyFactor ?? DEFAULT_SAFETY_FACTOR),
     verbose: config.verbose === true,
+    // Default ON: `!== false` keeps an unset value at the default while still
+    // honoring an explicit `false`.
+    countFailedAttempts: config.countFailedAttempts !== false,
   }
   initRateLimiter(cfg)
   if (verbose) console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, verbose: ${cfg.verbose}`)
@@ -344,9 +362,17 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
     // Return a wrapped stream that adds delay before the first chunk
     // and counts output tokens
     const wrappedStream = (async function* (): AsyncIterable<unknown> {
+      // A fresh serial per intercepted stream: one stream is one attempt, so
+      // `#N` is what makes a log line traceable across retries. `GenerateOptions`
+      // carries no turn/step, so `sessionId` is the only host-supplied identity
+      // available here (turn/step live in the agent loop's session events).
+      streamCounter += 1
+      const streamSerial = streamCounter
       const now = Date.now()
-      const opts = options as { messages?: Array<{ content?: unknown[] }> }
+      const opts = options as { messages?: Array<{ content?: unknown[] }>; sessionId?: string }
       const messages = opts.messages ?? []
+      const sessionTag =
+        typeof opts.sessionId === 'string' && opts.sessionId.length > 0 ? ` session=${opts.sessionId}` : ''
 
       // Use the average of recent actual input token counts from the API as the
       // estimate for this request — far more accurate than heuristic estimation.
@@ -359,14 +385,17 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
       if (delay > 0) {
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
-        if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
+        if (verbose) console.log(`[agent-rate-limit] #${streamSerial}${sessionTag} Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
         await ctx.timer.timeout(delay)
       }
 
       // Stream chunks, capture actual API token usage, and detect failures
       let hadFailure = false
+      let usageSeen = false
       let actualInputTokens = 0
       let actualOutputTokens = 0
+      let wireTotal: number | undefined
+      let finishReason = 'unknown'
       // Usage breakdown for verbose logging (uncached + cache hits)
       let usageUncached = 0
       let usageCachedRead = 0
@@ -374,26 +403,35 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
       for await (const chunk of originalStream) {
         const chunkObj = chunk as {
           type?: string
-          usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+          usage?: {
+            inputTokens: number
+            outputTokens: number
+            totalTokens?: number
+            cacheReadTokens?: number
+            cacheWriteTokens?: number
+          }
           reason?: { kind?: string }
         }
         // Capture the actual token usage from the API's usage chunk.
-        // Note: inputTokens is uncached input only; cache hits are reported
-        // separately as cacheReadTokens/cacheWriteTokens. We include all of
-        // them to match the API's billed total.
+        // DSH's TokenUsage convention is DISJOINT: inputTokens is uncached input
+        // only; cache hits arrive separately as cacheReadTokens/cacheWriteTokens.
+        // We recombine every part to match the API's billed total.
         if (chunkObj.type === 'usage' && chunkObj.usage) {
+          usageSeen = true
           usageUncached = chunkObj.usage.inputTokens
           usageCachedRead = chunkObj.usage.cacheReadTokens ?? 0
           usageCachedWrite = chunkObj.usage.cacheWriteTokens ?? 0
+          wireTotal = chunkObj.usage.totalTokens
           actualInputTokens = usageUncached + usageCachedRead + usageCachedWrite
           actualOutputTokens = chunkObj.usage.outputTokens
         }
         // Detect terminal error/aborted finish chunks — the LLM adapter signals
         // failures (e.g. HTTP 429) as finish chunks, NOT by throwing. Without
         // this check, the for-await loop completes normally, and the code
-        // below would incorrectly record tokens.
+        // below would incorrectly treat a failed attempt as a success.
         if (chunkObj.type === 'finish' && chunkObj.reason) {
           const reasonKind = chunkObj.reason.kind
+          finishReason = reasonKind ?? 'unknown'
           if (reasonKind === 'error' || reasonKind === 'aborted') {
             hadFailure = true
           }
@@ -401,29 +439,72 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
         yield chunk
       }
 
-      // Only record usage on successful completion
+      const recordTime = Date.now()
+
+      // Feed the input estimate from ANY attempt that reported usage, including
+      // failed ones: a retry sends the same prompt, so the size a failed attempt
+      // just revealed is exactly what the next attempt needs. 3 samples keeps it
+      // responsive to load changes.
+      if (usageSeen && actualInputTokens > 0) {
+        recentInputTokens.push(actualInputTokens)
+        if (recentInputTokens.length > 3) recentInputTokens.shift()
+      }
+
+      // Drift guard: the usage contract guarantees
+      // `totalTokens = inputTokens + outputTokens + cacheRead + cacheWrite`.
+      // A mismatch means upstream/relay accounting changed, which would skew
+      // this window silently.
+      if (
+        usageSeen &&
+        wireTotal !== undefined &&
+        wireTotal !== actualInputTokens + actualOutputTokens &&
+        verbose
+      ) {
+        console.log(
+          `[agent-rate-limit] #${streamSerial}${sessionTag} usage self-check FAILED: ` +
+            `parts=${actualInputTokens + actualOutputTokens} wire.totalTokens=${wireTotal} ` +
+            `(uncached=${usageUncached}, cacheReadTokens=${usageCachedRead}, ` +
+            `cacheWriteTokens=${usageCachedWrite}, outputTokens=${actualOutputTokens})`,
+        )
+      }
+
       if (!hadFailure) {
         // Use the API's actual token counts when available (far more accurate
         // than heuristic estimation), otherwise fall back to the estimated sum.
-        const totalTokens = actualInputTokens > 0
-          ? actualInputTokens + actualOutputTokens
-          : estimatedInputTokens
-        addToWindow(totalTokens, Date.now())
+        const totalTokens = usageSeen ? actualInputTokens + actualOutputTokens : estimatedInputTokens
+        addToWindow(totalTokens, recordTime)
         if (verbose) {
-          const detail = actualInputTokens > 0
-            ? `uncached: ${usageUncached}, cached: ${usageCachedRead + usageCachedWrite}, output: ${actualOutputTokens}`
+          const detail = usageSeen
+            ? `uncached: ${usageUncached}, cached: ${usageCachedRead + usageCachedWrite} (= prompt ${actualInputTokens}), output: ${actualOutputTokens}`
             : `estimated: ${estimatedInputTokens}i`
-          console.log(`[agent-rate-limit] Recorded ${totalTokens} tokens (${detail})`)
+          console.log(`[agent-rate-limit] #${streamSerial}${sessionTag} Recorded ${totalTokens} tokens (${detail})`)
         }
-        // Store the actual input count so the next request can use it
-        // as a much more accurate estimate than heuristic calculation.
-        // Keep a sliding window of the last 3 values for a stable moving average.
-        if (actualInputTokens > 0) {
-          recentInputTokens.push(actualInputTokens)
-          if (recentInputTokens.length > 3) {
-            recentInputTokens.shift()
-          }
+        return
+      }
+
+      // Failed or aborted attempt. When the stream reported usage the upstream
+      // already processed and billed the prompt, so by default it is counted
+      // into the window (`countFailedAttempts: true`); the switch restores the
+      // old "failed attempts consume no budget" behavior. Either way the line is
+      // ALWAYS logged: swallowing it here is what previously made these logs
+      // impossible to reconcile with the harness turn statistics, because a
+      // failed cold-cache attempt is exactly where the uncached input lives.
+      if (usageSeen) {
+        const totalTokens = actualInputTokens + actualOutputTokens
+        const counted = countFailedAttempts
+        if (counted) addToWindow(totalTokens, recordTime)
+        if (verbose) {
+          console.log(
+            `[agent-rate-limit] #${streamSerial}${sessionTag} Recorded ${totalTokens} tokens ` +
+              `(failed/${finishReason}, ${counted ? 'counted' : 'not counted'}, ` +
+              `uncached: ${usageUncached}, cached: ${usageCachedRead + usageCachedWrite} ` +
+              `(= prompt ${actualInputTokens}), output: ${actualOutputTokens})`,
+          )
         }
+      } else if (verbose) {
+        console.log(
+          `[agent-rate-limit] #${streamSerial}${sessionTag} Failed attempt (${finishReason}) reported no usage — nothing recorded`,
+        )
       }
     })()
 
@@ -454,6 +535,7 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
           `  Safety factor: ${safetyFactor}`,
           `  Window:        ${windowMs / 1000}s`,
           `  Verbose:       ${verbose}`,
+          `  Count failed:  ${countFailedAttempts}`,
           `Current:`,
           `  Window entries:  ${windowEntries.length}`,
           `  Current TPM:     ${currentTpm.toLocaleString()}`,
@@ -472,4 +554,5 @@ export {
   DEFAULT_RPM_LIMIT,
   DEFAULT_SAFETY_FACTOR,
   DEFAULT_VERBOSE,
+  DEFAULT_COUNT_FAILED_ATTEMPTS,
 }

@@ -61,6 +61,7 @@ The `id` must be `agent-rate-limit`: the bundle already inserted that entry, so 
 | `tpmLimit` | number | `1200000` | Tokens-per-minute ceiling. The default matches Alibaba Cloud Bailian deepseek-v4-flash |
 | `rpmLimit` | number | `15000` | Requests-per-minute ceiling |
 | `safetyFactor` | number | `0.8` | Safety factor. **The effective ceiling is `tpmLimit × safetyFactor`**, so by default only 80% of the quota is used, leaving a 20% buffer |
+| `countFailedAttempts` | boolean | `true` | Whether attempts that end in `error` / `aborted` but did report usage still count toward the window. The upstream did process and bill that prompt, so excluding it understates window pressure; disable to restore "failed attempts consume no budget". **Failed attempts are logged either way** |
 | `verbose` | boolean | `false` | Log the delay and token accounting for every request; turn on when diagnosing |
 
 ## Checking status
@@ -75,6 +76,7 @@ Config:
   Safety factor: 0.8
   Window:        60s
   Verbose:       false
+  Count failed:  true
 Current:
   Window entries:  12
   Current TPM:     14,765
@@ -88,7 +90,7 @@ Current:
 - **Passes through while there is headroom**: when the accumulated window plus this request's estimated input stays under the effective ceiling, the delay is `0`
 - **Queues only near the ceiling**: it waits until enough old entries slide out of the window to free up room
 - **Scales up under concurrency**: while you wait, other agents keep drawing on the quota, so the plugin multiplies the delay by the overshoot ratio
-- **Failed requests cost no budget**: streams ending in `error` / `aborted` are not recorded, so retries do not slow themselves down
+- **Failed attempts are still accounted for**: an attempt that ends in `error` / `aborted` but reported usage **counts toward the window by default** (the upstream did process and bill that prompt); set `countFailedAttempts: false` to turn that off. Either way it is logged, so usage is never silently swallowed
 - **The delay happens before dispatch**: waiting occurs before the stream starts and never interrupts a response already in flight
 
 ## Known limitations (measured)
@@ -105,6 +107,7 @@ Current:
 - Rate limiting is automatic: hitting the ceiling shows up as a **slower response**, never as an error
 - To check whether it is live, ask the user to run `/agent-rate-limit`; `Status: loaded` means it is loaded
 - The configuration file is `~/.dsh/profiles/web/cordis.patch.yml`; editing it takes effect **as soon as it is saved, with no restart** (the patch layer is hot-reloaded). Only installing or removing the plugin itself requires a restart
+- **`verbose: true` logs reconcile directly against DSH's per-turn usage**: each line carries a `#serial`, failed attempts are marked `failed/<reason>`, and `uncached + cached = prompt` verifies at a glance. If the two disagree, check whether failed attempts are counted, then whether upstream changed its usage fields — the plugin prints `usage self-check FAILED` when `totalTokens` disagrees with its parts
 
 ## Compatibility
 

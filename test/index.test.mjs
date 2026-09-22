@@ -62,6 +62,19 @@ async function runStream(handler, chunks, options = {}) {
   return out
 }
 
+/** Capture the plugin's console.log output while `fn` runs. */
+async function captureLogs(fn) {
+  const original = console.log
+  const logs = []
+  console.log = (...args) => logs.push(args.map(String).join(' '))
+  try {
+    await fn()
+  } finally {
+    console.log = original
+  }
+  return logs.filter((line) => line.startsWith('[agent-rate-limit]'))
+}
+
 /** Read the numbers back out of the /agent-rate-limit command output. */
 function parseStatus(result) {
   assert.equal(result.kind, 'success')
@@ -125,7 +138,7 @@ test('a successful stream records the billed total including cache hits', async 
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 1, tpm: 200 })
 })
 
-test('a failed stream records nothing', async () => {
+test('a failed stream that reported usage is counted by default', async () => {
   const { ctx, listeners, commands } = makeCtx()
   await apply(ctx, {})
 
@@ -138,14 +151,12 @@ test('a failed stream records nothing', async () => {
     { messages: [] },
   )
 
-  assert.deepEqual(
-    parseStatus(commands[0].handler()),
-    { entries: 0, tpm: 0 },
-    'a failed request must not consume window budget',
-  )
+  // The upstream processed and billed that prompt, so the default keeps it in
+  // the window: excluding it understates TPM pressure.
+  assert.deepEqual(parseStatus(commands[0].handler()), { entries: 1, tpm: 150 })
 })
 
-test('an aborted stream records nothing', async () => {
+test('an aborted stream that reported usage is counted by default', async () => {
   const { ctx, listeners, commands } = makeCtx()
   await apply(ctx, {})
 
@@ -158,7 +169,133 @@ test('an aborted stream records nothing', async () => {
     { messages: [] },
   )
 
+  assert.deepEqual(parseStatus(commands[0].handler()), { entries: 1, tpm: 150 })
+})
+
+test('countFailedAttempts: false keeps failed usage out of the window but still logs it', async () => {
+  const { ctx, listeners, commands } = makeCtx()
+  await apply(ctx, { countFailedAttempts: false, verbose: true })
+
+  const logs = await captureLogs(() =>
+    runStream(
+      listeners.get('llm/stream')[0],
+      [
+        {
+          type: 'usage',
+          usage: { inputTokens: 187803, cacheReadTokens: 209280, outputTokens: 2112 },
+        },
+        { type: 'finish', reason: { kind: 'error' } },
+      ],
+      { messages: [] },
+    ),
+  )
+
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 0, tpm: 0 })
+  const record = logs.find((line) => line.includes('Recorded 399195 tokens'))
+  assert.ok(record, `a failed attempt must still be logged, got:\n${logs.join('\n')}`)
+  assert.match(record, /failed\/error/)
+  assert.match(record, /not counted/)
+  assert.match(record, /uncached: 187803/)
+  // uncached + cached must be visible as the prompt total, so the next reader
+  // cannot mistake a fully-cached prompt for missing data.
+  assert.match(record, /cached: 209280 \(= prompt 397083\)/)
+})
+
+test('a failed attempt without any usage chunk records nothing and says so', async () => {
+  const { ctx, listeners, commands } = makeCtx()
+  await apply(ctx, { verbose: true })
+
+  const logs = await captureLogs(() =>
+    runStream(
+      listeners.get('llm/stream')[0],
+      [{ type: 'finish', reason: { kind: 'error' } }],
+      { messages: [] },
+    ),
+  )
+
+  assert.deepEqual(parseStatus(commands[0].handler()), { entries: 0, tpm: 0 })
+  assert.ok(
+    logs.some((line) => line.includes('reported no usage')),
+    `expected an explicit no-usage notice, got:\n${logs.join('\n')}`,
+  )
+})
+
+test('a failed attempt followed by a successful retry records both attempts', async () => {
+  const { ctx, listeners, commands } = makeCtx()
+  await apply(ctx, {})
+
+  const handler = listeners.get('llm/stream')[0]
+  // Cold cache: the whole prompt is uncached when the attempt fails.
+  await runStream(
+    handler,
+    [
+      { type: 'usage', usage: { inputTokens: 6822, outputTokens: 0 } },
+      { type: 'finish', reason: { kind: 'error' } },
+    ],
+    { messages: [] },
+  )
+  // Retry hits the now-warm cache: the uncached part is zero.
+  await runStream(
+    handler,
+    [
+      { type: 'usage', usage: { inputTokens: 0, cacheReadTokens: 8704, outputTokens: 117 } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+    { messages: [] },
+  )
+
+  // 6822 + (8704 + 117) = 15,643. The failed attempt's uncached input is the
+  // part that used to vanish from the ledger entirely.
+  assert.deepEqual(parseStatus(commands[0].handler()), { entries: 2, tpm: 15643 })
+})
+
+test('verbose logs carry the attempt serial and the prompt total', async () => {
+  const { ctx, listeners } = makeCtx()
+  await apply(ctx, { verbose: true })
+
+  const logs = await captureLogs(() =>
+    runStream(
+      listeners.get('llm/stream')[0],
+      [
+        {
+          type: 'usage',
+          usage: { inputTokens: 100, cacheReadTokens: 20, cacheWriteTokens: 30, outputTokens: 50 },
+        },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ],
+      { messages: [], sessionId: 'sess-1' },
+    ),
+  )
+
+  const record = logs.find((line) => line.includes('Recorded 200 tokens'))
+  assert.ok(record, `expected a record line, got:\n${logs.join('\n')}`)
+  // The serial is module-level and monotonic across apply() calls, so assert
+  // the shape rather than an absolute number.
+  assert.match(record, /#\d+ session=sess-1/, 'log line carries serial and session')
+  assert.match(record, /uncached: 100, cached: 50 \(= prompt 150\), output: 50/)
+})
+
+test('a wire totalTokens mismatch is reported instead of silently skewing the window', async () => {
+  const { ctx, listeners, commands } = makeCtx()
+  await apply(ctx, { verbose: true })
+
+  const logs = await captureLogs(() =>
+    runStream(
+      listeners.get('llm/stream')[0],
+      [
+        { type: 'usage', usage: { inputTokens: 10, outputTokens: 5, totalTokens: 999 } },
+        { type: 'finish', reason: { kind: 'stop' } },
+      ],
+      { messages: [] },
+    ),
+  )
+
+  assert.ok(
+    logs.some((line) => line.includes('usage self-check FAILED')),
+    `expected a drift warning, got:\n${logs.join('\n')}`,
+  )
+  // The parts still win: the window keeps the recombined billed total.
+  assert.deepEqual(parseStatus(commands[0].handler()), { entries: 1, tpm: 15 })
 })
 
 test('an over-limit window delays the next request through ctx.timer.timeout', async () => {
