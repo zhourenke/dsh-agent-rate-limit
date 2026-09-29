@@ -146,6 +146,14 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 
 这种"随插件一起消失"的语义正是本插件需要的：延迟不应比安排它的插件活得更久。
 
+### 8. 数值配置要过一遍护栏：`z.number()` 挡不住 `NaN`
+
+`schemastery` 的 `z.number()` 只检查类型，**`NaN` 与任意有限值都能通过**，范围约束也补不上这个洞——实测（3.18.4）：`z.number().min(1)` 拒绝 `0` 与 `-5`（`expected number >= 1 but got 0`），却**放行 `NaN`**。所以护栏只能写在消费这些数值的地方。
+
+它值得单列，是因为三种非法值都**静默失败、且方向各不相同**：`NaN` 让窗口比较全部为假，于是插件照常加载、照常打日志，却再也不产生任何延迟；`windowMs: 0` 表示任何条目一进窗口就被剪掉，窗口永远为空；`safetyFactor: 0` 把生效上限压成 0，于是每个请求都要等满一个窗口。前两种是"限速器悄悄不工作"，正是这个插件最不该出现的失败形态。
+
+`apply` 因此在解析完配置、注册任何监听之前先做 `Number.isFinite(value) && value > 0`，不满足就抛错（错误里带字段名）。**这与宿主的既有行为一致**：cordis 的 `resolveConfig` 会用插件导出的 `Config` 校验配置，类型不对时直接抛 `ValidationError`，所以"数值非法"和"类型不对"是同一种响度。抛在注册之前还有一个好处——不会留下半注册的插件。
+
 ## 测试要点
 
 - 直接 `import '../lib/index.js'`，断言模块契约（`name` / `inject` / `apply` / `Config`）
@@ -160,6 +168,7 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 - 覆盖冷启动估算：provider 从不上报 usage 时，窗口按估算值记账，且下一次请求是否等待由该估算决定（同时证明估算值是每次请求现算、不缓存）
 - 覆盖定时器被卸载拒绝：`ctx.timer.timeout` 拒绝后，chunk 仍全部到达调用方，并打印 `Delay abandoned`
 - 覆盖清单契约：`icon` 字段、`exports['./locale/*.json']`、`files` 条目、字典的非空标题与说明，以及编译产物里不出现 `@deepseek-ai/dsh-llm` 的值导入
+- 覆盖数值配置护栏：四个数值取 `0`、负数或 `NaN` 时必须抛错，且**抛错发生在注册之前**——监听器与命令都不留痕
 - 模块级状态由 `apply` 内的 `initRateLimiter()` 重置，因此多次 `apply` 之间天然隔离
 
 ## 发布纪律

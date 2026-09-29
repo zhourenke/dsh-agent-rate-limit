@@ -20,7 +20,7 @@
  */
 
 import z from '@deepseek-ai/schemastery'
-import type { ContentBlock, GenerateOptions, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -86,18 +86,48 @@ let safetyFactor = DEFAULT_SAFETY_FACTOR
 let verbose = DEFAULT_VERBOSE
 let countFailedAttempts = DEFAULT_COUNT_FAILED_ATTEMPTS
 
-/**
- * Initialize the rate limiter with the given config.
- * @internal
- */
-function initRateLimiter(config: {
+/** Configuration after the schema's defaults and the local normalization. */
+interface ResolvedConfig {
   windowMs: number
   tpmLimit: number
   rpmLimit: number
   safetyFactor: number
   verbose: boolean
   countFailedAttempts: boolean
-}): void {
+}
+
+/**
+ * Reject a configuration the limiter cannot honor.
+ *
+ * `Config` checks the type only: schemastery's `z.number()` accepts `NaN` and
+ * every finite value, 0 and negatives included (measured: `min(1)` rejects `0`
+ * and `-5` but passes `NaN`). Each of those fails silently and in the wrong
+ * direction for a limiter — `NaN` makes every window comparison false, so no
+ * delay is ever computed and the plugin keeps logging while pacing nothing;
+ * `windowMs: 0` never accumulates a window; `safetyFactor: 0` waits out the
+ * whole window on every request. Throwing matches what the host already does
+ * for a config of the wrong type (`resolveConfig` throws `ValidationError`), so
+ * a bad number stays exactly as loud as a bad type.
+ *
+ * @internal
+ */
+function assertUsableLimits(cfg: ResolvedConfig): void {
+  const require = (key: string, value: number): void => {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`[agent-rate-limit] config ${key} must be a positive finite number, got ${value}`)
+    }
+  }
+  require('windowMs', cfg.windowMs)
+  require('tpmLimit', cfg.tpmLimit)
+  require('rpmLimit', cfg.rpmLimit)
+  require('safetyFactor', cfg.safetyFactor)
+}
+
+/**
+ * Initialize the rate limiter with the given config.
+ * @internal
+ */
+function initRateLimiter(config: ResolvedConfig): void {
   windowMs = config.windowMs
   tpmLimit = config.tpmLimit
   rpmLimit = config.rpmLimit
@@ -224,7 +254,7 @@ function calculateDelay(estimatedInputTokens: number, now: number): number {
  * @internal
  */
 function estimateTokens(text: string): number {
-  if (!text || text.length === 0) return 0
+  if (text.length === 0) return 0
   // Count CJK characters
   const cjkChars = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g) || []).length
   const otherChars = text.length - cjkChars
@@ -267,7 +297,7 @@ function estimateBlockTokens(block: ContentBlock): number {
  */
 function estimateRequestTokens(options: GenerateOptions): number {
   let total = 0
-  for (const message of options.messages as readonly RequestMessage[]) {
+  for (const message of options.messages) {
     for (const block of message.content) total += estimateBlockTokens(block)
   }
   if (options.system !== undefined) total += estimateTokens(options.system)
@@ -341,10 +371,15 @@ interface PluginContext {
   /**
    * Register a lifecycle effect, disposed together with the plugin.
    *
+   * Required rather than optional: it is a core method of the Cordis context,
+   * and calling it through an optional chain would silently drop the command
+   * registration's disposer, leaving the next live reload to fail with
+   * `command "agent-rate-limit" is already registered in this scope`.
+   *
    * The callback's return value IS the disposer, so any registration made
    * inside it has to be returned rather than dropped.
    */
-  effect?(callback: () => void | (() => void)): void
+  effect(callback: () => void | (() => void)): void
   /**
    * Injected timeout service.
    *
@@ -379,6 +414,7 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
     // honoring an explicit `false`.
     countFailedAttempts: config.countFailedAttempts !== false,
   }
+  assertUsableLimits(cfg)
   initRateLimiter(cfg)
   if (verbose) console.log(`[agent-rate-limit] Plugin loaded. TPM: ${cfg.tpmLimit}, RPM: ${cfg.rpmLimit}, factor: ${cfg.safetyFactor}, window: ${cfg.windowMs}ms, verbose: ${cfg.verbose}`)
 
@@ -415,9 +451,14 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
       // Calculate and apply delay before the first chunk
       const delay = calculateDelay(estimatedInputTokens, now)
       if (delay > 0) {
-        const currentTpm = sumWindow(now)
-        const effectiveLimit = getEffectiveTpmLimit()
-        if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
+        // The window figures below exist only for the log line, so they are read
+        // inside the verbose branch — `sumWindow` walks the whole window, and
+        // this path runs on every delayed request.
+        if (verbose) {
+          const currentTpm = sumWindow(now)
+          const effectiveLimit = getEffectiveTpmLimit()
+          console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
+        }
         try {
           await ctx.timer.timeout(delay)
         } catch {
@@ -550,13 +591,12 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
   // it leaves the registration alive after the plugin unloads. The web profile
   // reloads patches live, so the next activation would then fail with
   // `command "agent-rate-limit" is already registered in this scope`.
-  ctx.effect?.(() =>
+  ctx.effect(() =>
     ctx.commands.register({
       name: 'agent-rate-limit',
       description: 'Show agent-rate-limit plugin status and configuration.',
       handler: () => {
         const now = Date.now()
-        pruneWindow(now)
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
         const lines = [
@@ -580,11 +620,3 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
 }
 
 export { apply, Config, inject, name }
-export {
-  DEFAULT_WINDOW_MS,
-  DEFAULT_TPM_LIMIT,
-  DEFAULT_RPM_LIMIT,
-  DEFAULT_SAFETY_FACTOR,
-  DEFAULT_VERBOSE,
-  DEFAULT_COUNT_FAILED_ATTEMPTS,
-}

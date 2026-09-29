@@ -66,6 +66,8 @@ dsh plugin --profile web remove @zhourenke/dsh-agent-rate-limit
 | `countFailedAttempts` | boolean | `true` | 以 `error` / `aborted` 结束、但上游已回报用量的尝试是否计入窗口。上游确实处理并计费了那一次 prompt，不计会低估窗口压力；关掉可恢复"失败不占额度"。**无论开关如何，失败尝试都会打印日志** |
 | `verbose` | boolean | `false` | 输出每次请求的延迟与令牌记录日志，排查问题时打开 |
 
+四项数值配置必须是正数：写成 `0`、负数或 `NaN` 时插件会**拒绝加载并报出具体字段**，而不是静默不再限速。
+
 ## 查看状态
 
 `/agent-rate-limit` 会打印当前配置与窗口占用：

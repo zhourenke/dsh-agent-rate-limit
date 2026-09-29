@@ -496,3 +496,31 @@ test('the emitted module keeps no runtime import of the host LLM package', () =>
   const emitted = readFileSync(new URL('lib/index.js', packageRoot), 'utf8')
   assert.doesNotMatch(emitted, /from\s*['"]@deepseek-ai\/dsh-llm['"]/, 'no runtime dsh-llm import')
 })
+
+test('a configuration the limiter cannot honor fails loudly instead of pacing nothing', async () => {
+  // The schema checks the type only. Measured on schemastery 3.18.4: `min(1)`
+  // rejects 0 and -5 but passes NaN, so a range constraint alone would not be
+  // enough. NaN is the dangerous value - every window comparison against it is
+  // false, so the plugin would load, keep logging, and never delay anything.
+  for (const [key, value] of [
+    ['windowMs', 0],
+    ['tpmLimit', 0],
+    ['rpmLimit', -1],
+    ['safetyFactor', 0],
+    ['tpmLimit', Number.NaN],
+    ['safetyFactor', Number.NaN],
+  ]) {
+    const { ctx } = makeCtx()
+    await assert.rejects(
+      () => apply(ctx, { [key]: value }),
+      new RegExp(`config ${key} must be a positive finite number`),
+      `${key} = ${value} is rejected`,
+    )
+  }
+
+  // A rejected configuration must not leave a half-registered plugin behind.
+  const { ctx, listeners, commands } = makeCtx()
+  await assert.rejects(() => apply(ctx, { windowMs: Number.NaN }))
+  assert.equal(listeners.size, 0, 'no listener survives a rejected configuration')
+  assert.equal(commands.length, 0, 'no command survives a rejected configuration')
+})

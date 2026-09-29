@@ -66,6 +66,8 @@ Keep the `id` and `name` lines exactly as written; do not rename them.
 | `countFailedAttempts` | boolean | `true` | Whether attempts that end in `error` / `aborted` but did report usage still count toward the window. The upstream did process and bill that prompt, so excluding it understates window pressure; disable to restore "failed attempts consume no budget". **Failed attempts are logged either way** |
 | `verbose` | boolean | `false` | Log the delay and token accounting for every request; turn on when diagnosing |
 
+The four numeric options must be positive: `0`, a negative value or `NaN` makes the plugin **refuse to load and name the field**, rather than silently stop limiting.
+
 ## Checking status
 
 `/agent-rate-limit` prints the current configuration and window occupancy:

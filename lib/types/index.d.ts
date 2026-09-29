@@ -20,23 +20,6 @@
  */
 import z from '@deepseek-ai/schemastery';
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
-/** Default sliding window size in milliseconds (60 seconds). */
-declare const DEFAULT_WINDOW_MS = 60000;
-/** Default TPM (Tokens Per Minute) limit, matching a common high-throughput tier. */
-declare const DEFAULT_TPM_LIMIT = 1200000;
-/** Default RPM (Requests Per Minute) limit. */
-declare const DEFAULT_RPM_LIMIT = 15000;
-/** Default safety factor (0.8 = use 80% of the limit to leave buffer). */
-declare const DEFAULT_SAFETY_FACTOR = 0.8;
-/** Default: verbose logging (false = only log startup and critical errors). */
-declare const DEFAULT_VERBOSE = false;
-/**
- * Default: count failed/aborted attempts into the window when the stream
- * reported actual usage. The upstream has already processed and billed the
- * prompt, so excluding it would understate window pressure. Failed attempts
- * are logged either way.
- */
-declare const DEFAULT_COUNT_FAILED_ATTEMPTS = true;
 /** Cordis plugin name used by loader diagnostics. */
 declare const name = "agent-rate-limit";
 /** Hard dependency on the timer service and commands service. */
@@ -103,10 +86,15 @@ interface PluginContext {
     /**
      * Register a lifecycle effect, disposed together with the plugin.
      *
+     * Required rather than optional: it is a core method of the Cordis context,
+     * and calling it through an optional chain would silently drop the command
+     * registration's disposer, leaving the next live reload to fail with
+     * `command "agent-rate-limit" is already registered in this scope`.
+     *
      * The callback's return value IS the disposer, so any registration made
      * inside it has to be returned rather than dropped.
      */
-    effect?(callback: () => void | (() => void)): void;
+    effect(callback: () => void | (() => void)): void;
     /**
      * Injected timeout service.
      *
@@ -134,4 +122,3 @@ interface PluginContext {
  */
 declare function apply(ctx: PluginContext, config: Record<string, unknown>): Promise<void>;
 export { apply, Config, inject, name };
-export { DEFAULT_WINDOW_MS, DEFAULT_TPM_LIMIT, DEFAULT_RPM_LIMIT, DEFAULT_SAFETY_FACTOR, DEFAULT_VERBOSE, DEFAULT_COUNT_FAILED_ATTEMPTS, };
