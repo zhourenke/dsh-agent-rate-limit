@@ -99,8 +99,8 @@ Current:
 
 - **Counted per process**: the window lives inside the DSH process, so multiple DSH instances do not share it — running several profiles at once means each one computes against the full quota, and the total can still exceed it.
 - **Configuration is global across providers**: one configuration applies to every provider under that plugin instance; there is no way to give different providers different ceilings.
-- **The first request can only be estimated**: with an empty window there is no history, so input tokens are estimated heuristically (about 1.5 characters per token for CJK text and 3.5 for the rest; images and files are priced by their reference structure, tool schemas are not counted); afterwards the average of the last 3 real API values is used.
-- **Auxiliary calls stay out of that average**: side calls such as context compaction and session titles are timed and counted in the window as usual, but their prompt size — a compaction prompt sits at the context ceiling, a title prompt is tiny — does not represent the next ordinary request, so it never becomes an estimate sample.
+- **The first request can only be estimated**: with an empty window there is no history, so input tokens are estimated heuristically; afterwards the average of the last 3 real API values is used.
+- **Side calls still occupy the window**: context compaction and session titles are counted too; they just do not feed the input-size estimate.
 - **A single oversized request cannot be split**: if one request alone approaches the quota, the plugin can only wait for it to slide out of the window, not break it up.
 - **No guarantee against throttling**: the goal is to sharply reduce the probability, not to prove it impossible. If something else consumes the quota at the same time a 429 can still occur — DSH's built-in retry takes over from there.
 
@@ -114,9 +114,7 @@ Current:
 
 ## Compatibility
 
-Built and tested against **DSH v0.1.7-rc.2** (2026-09), declaring `@deepseek-ai/dsh-llm: ^0.1.7-rc.2`.
-
-At startup DSH admits plugins by the host range they declare, and a mismatched plugin is not loaded by default; this plugin's range matches the current version, so it loads as installed.
+Tested with v0.1.7-rc.2 (2026-09).
 
 ## License
 
