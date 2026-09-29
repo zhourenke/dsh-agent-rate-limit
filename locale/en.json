@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Agent Rate Limit",
+    "description": "Paces agent-loop LLM requests against a sliding TPM/RPM window and records per-attempt usage."
+  }
+}

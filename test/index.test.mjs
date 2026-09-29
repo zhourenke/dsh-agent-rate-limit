@@ -13,6 +13,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync, readdirSync } from 'node:fs'
 
 const { apply, name, inject, Config } = await import('../lib/index.js')
 
@@ -317,4 +318,181 @@ test('an over-limit window delays the next request through ctx.timer.timeout', a
   assert.equal(timers.length, 1, 'the overshooting window delayed the request')
   assert.equal(typeof timers[0], 'number')
   assert.ok(timers[0] > 0, `delay must be positive, got ${timers[0]}`)
+})
+
+// ---------------------------------------------------------------------------
+// Auxiliary calls (`purpose`)
+//
+// The agent loop marks context compaction and session-title calls with
+// `purpose`. They spend provider quota, so they are paced and counted, but
+// their size says nothing about the next ordinary request: a compaction prompt
+// sits at the context ceiling and a title prompt is tiny.
+// ---------------------------------------------------------------------------
+
+/** Chunk sequence for a completed attempt that billed `inputTokens`. */
+function billedAttempt(inputTokens, outputTokens = 0) {
+  return [
+    { type: 'usage', usage: { inputTokens, outputTokens } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
+test('an auxiliary call is counted in the window but not fed to the input average', async () => {
+  const { ctx, listeners, timers } = makeCtx()
+  // The window reaches 6000 against a 8000 limit, while the estimated input for
+  // the next request is 1000 if the compaction sample is excluded and 3000 if
+  // it is included — a difference that crosses the 2000-token headroom.
+  await apply(ctx, { tpmLimit: 8000, safetyFactor: 1, rpmLimit: 15000 })
+  const handler = listeners.get('llm/stream')[0]
+
+  await runStream(handler, billedAttempt(1000), { messages: [] })
+  await runStream(handler, billedAttempt(5000), { messages: [], purpose: 'compaction' })
+  assert.equal(timers.length, 0, 'the window is still under the limit')
+
+  await runStream(handler, [{ type: 'finish', reason: { kind: 'stop' } }], { messages: [] })
+  assert.equal(timers.length, 0, 'the compaction sample did not inflate the estimate')
+})
+
+test('the same history without a purpose marker does feed the average', async () => {
+  const { ctx, listeners, timers } = makeCtx()
+  await apply(ctx, { tpmLimit: 8000, safetyFactor: 1, rpmLimit: 15000 })
+  const handler = listeners.get('llm/stream')[0]
+
+  await runStream(handler, billedAttempt(1000), { messages: [] })
+  await runStream(handler, billedAttempt(5000), { messages: [] })
+
+  await runStream(handler, [{ type: 'finish', reason: { kind: 'stop' } }], { messages: [] })
+  // Average 3000 -> target 5000 < window 6000: the identical history now waits.
+  // This is the control for the test above; only `purpose` differs.
+  assert.equal(timers.length, 1, 'an ordinary sample shifts the estimate and forces the wait')
+})
+
+// ---------------------------------------------------------------------------
+// Cold-start estimation (no provider ever reported usage)
+//
+// A provider that reports no usage leaves the average empty, so every request
+// is priced by the local estimator — including the entry it records in the
+// window, which is what lets the estimate decide the next wait.
+// ---------------------------------------------------------------------------
+
+test('a request with no usage report is priced by the estimator', async () => {
+  const { ctx, listeners, timers } = makeCtx()
+  await apply(ctx, { tpmLimit: 200, safetyFactor: 1, rpmLimit: 15000, verbose: true })
+  const handler = listeners.get('llm/stream')[0]
+
+  // 400 ASCII characters at the local 3.5 chars/token density -> 115 tokens.
+  const options = { messages: [{ content: [{ type: 'text', text: 'a'.repeat(400) }] }] }
+  const stream = [{ type: 'finish', reason: { kind: 'stop' } }]
+
+  const logs = await captureLogs(() => runStream(handler, stream, options))
+  assert.ok(
+    logs.includes('[agent-rate-limit] Recorded 115 tokens (estimated: 115i)'),
+    `the estimator priced the request, got: ${JSON.stringify(logs)}`,
+  )
+  assert.equal(timers.length, 0, 'the first request runs immediately')
+
+  // The window now holds 115 while no usage report ever arrived, so the same
+  // estimate is reused: target = 200 - 115 = 85 < 115, and the request waits.
+  await runStream(handler, stream, options)
+  assert.equal(timers.length, 1, 'the estimate sized the window and forced the wait')
+})
+
+test('the estimate is derived per request, not cached', async () => {
+  const { ctx, listeners, timers } = makeCtx()
+  await apply(ctx, { tpmLimit: 200, safetyFactor: 1, rpmLimit: 15000 })
+  const handler = listeners.get('llm/stream')[0]
+  const stream = [{ type: 'finish', reason: { kind: 'stop' } }]
+
+  await runStream(handler, stream, { messages: [{ content: [{ type: 'text', text: 'a'.repeat(400) }] }] })
+  // A 2-character prompt prices at 1 token: target = 199 > window 115.
+  await runStream(handler, stream, { messages: [{ content: [{ type: 'text', text: 'hi' }] }] })
+  assert.equal(timers.length, 0, 'a short prompt leaves room in the same window')
+})
+
+// ---------------------------------------------------------------------------
+// Live reload
+// ---------------------------------------------------------------------------
+
+test('a delay disposed by a patch reload does not fail the request', async () => {
+  const { ctx, listeners, timers } = makeCtx()
+  await apply(ctx, { tpmLimit: 100, safetyFactor: 1, rpmLimit: 15000, verbose: true })
+  const handler = listeners.get('llm/stream')[0]
+  const stream = billedAttempt(100)
+
+  await runStream(handler, stream, { messages: [] })
+
+  // The host implements `timeout` as a context effect, so disposing the plugin
+  // while a delay is pending rejects it. The chunks must still reach the caller.
+  ctx.timer.timeout = (ms) => {
+    timers.push(ms)
+    return Promise.reject(new Error('Context has been disposed'))
+  }
+  let received = []
+  const logs = await captureLogs(async () => {
+    received = await runStream(handler, stream, { messages: [] })
+  })
+
+  assert.equal(timers.length, 1, 'the delay was attempted')
+  assert.ok(timers[0] > 0, 'the attempted delay was positive')
+  assert.equal(received.length, 2, 'both chunks still reached the caller')
+  assert.ok(
+    logs.includes('[agent-rate-limit] Delay abandoned: the plugin was disposed while waiting'),
+    `the abandoned delay was reported, got: ${JSON.stringify(logs)}`,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Manifest contract
+//
+// The host reads the display metadata and the icon WITHOUT activating the
+// plugin, and a malformed one fails only when the user restarts DSH.
+// ---------------------------------------------------------------------------
+
+const packageRoot = new URL('..', import.meta.url)
+const manifest = JSON.parse(readFileSync(new URL('package.json', packageRoot), 'utf8'))
+
+test('inject names exactly the services this plugin reads', () => {
+  // `inject` gates activation: naming a service the plugin never touches holds
+  // it back for an unrelated package, and omitting one it does touch leaves the
+  // property undefined at activate time.
+  assert.deepEqual([...inject].sort(), ['commands', 'timer'])
+})
+
+test('the display metadata the Plugin Manager reads is present and valid', () => {
+  // `locale/*.json` resolves through the package `exports` map and neither it
+  // nor the icon is auto-included in the payload, so both must be declared.
+  assert.equal(manifest.icon, './icon.svg', 'icon field points at the icon')
+  assert.equal(
+    manifest.exports['./locale/*.json'],
+    './locale/*.json',
+    'locale dictionaries resolve through exports',
+  )
+  for (const entry of ['icon.svg', 'locale/*.json']) {
+    assert.ok(manifest.files.includes(entry), `files lists ${entry}`)
+  }
+
+  const icon = readFileSync(new URL(manifest.icon, packageRoot))
+  assert.ok(icon.byteLength > 0, 'the icon is not empty')
+  assert.ok(icon.byteLength <= 256 * 1024, 'the icon is within the 256 KiB limit')
+  assert.match(icon.toString('utf8'), /^<svg[\s>]/, 'the icon is an SVG document')
+
+  const localeDir = new URL('locale/', packageRoot)
+  const dictionaries = readdirSync(localeDir).filter((file) => file.endsWith('.json'))
+  assert.ok(dictionaries.length > 0, 'at least one dictionary exists')
+  for (const file of dictionaries) {
+    const dict = JSON.parse(readFileSync(new URL(file, localeDir), 'utf8'))
+    // An empty or non-string title/description makes the loader THROW.
+    assert.equal(typeof dict.meta?.title, 'string', `${file} carries a title`)
+    assert.ok(dict.meta.title.length > 0, `${file} title is not empty`)
+    assert.equal(typeof dict.meta?.description, 'string', `${file} carries a description`)
+    assert.ok(dict.meta.description.length > 0, `${file} description is not empty`)
+  }
+})
+
+test('the emitted module keeps no runtime import of the host LLM package', () => {
+  // The llm/stream contract is bound with `import type`, which tsc erases. A
+  // value import would load the host's streaming vocabulary a second time
+  // instead of sharing the instance the running host already owns.
+  const emitted = readFileSync(new URL('lib/index.js', packageRoot), 'utf8')
+  assert.doesNotMatch(emitted, /from\s*['"]@deepseek-ai\/dsh-llm['"]/, 'no runtime dsh-llm import')
 })

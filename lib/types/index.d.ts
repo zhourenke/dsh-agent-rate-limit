@@ -10,9 +10,16 @@
  * delegated to the built-in DSH `dsh-llm-retry` plugin via provider-level
  * `retryPolicy` configuration.
  *
+ * Verified against DSH 0.1.7-rc.2: the `llm/stream` Waterfall signature, the
+ * disjoint `TokenUsage` counts, the `error`/`aborted` finish reasons, and the
+ * injected `timer`/`commands` services are all unchanged from the version this
+ * plugin was first written against, and no shipped DSH package paces requests
+ * against a provider TPM/RPM quota.
+ *
  * @module @zhourenke/dsh-agent-rate-limit
  */
 import z from '@deepseek-ai/schemastery';
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
 /** Default sliding window size in milliseconds (60 seconds). */
 declare const DEFAULT_WINDOW_MS = 60000;
 /** Default TPM (Tokens Per Minute) limit, matching a common high-throughput tier. */
@@ -35,21 +42,21 @@ declare const name = "agent-rate-limit";
 /** Hard dependency on the timer service and commands service. */
 declare const inject: string[];
 /** Plugin configuration schema. */
-declare const Config: z<Schemastery.ObjectS<{
-    windowMs: z<number, number>;
-    tpmLimit: z<number, number>;
-    rpmLimit: z<number, number>;
-    safetyFactor: z<number, number>;
-    verbose: z<boolean, boolean>;
-    countFailedAttempts: z<boolean, boolean>;
-}>, Schemastery.ObjectT<{
-    windowMs: z<number, number>;
-    tpmLimit: z<number, number>;
-    rpmLimit: z<number, number>;
-    safetyFactor: z<number, number>;
-    verbose: z<boolean, boolean>;
-    countFailedAttempts: z<boolean, boolean>;
-}>>;
+declare const Config: z<Schemastery.ObjectS<NoInfer<{
+    windowMs: z<number, number, "defined">;
+    tpmLimit: z<number, number, "defined">;
+    rpmLimit: z<number, number, "defined">;
+    safetyFactor: z<number, number, "defined">;
+    verbose: z<boolean, boolean, "defined">;
+    countFailedAttempts: z<boolean, boolean, "defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    windowMs: z<number, number, "defined">;
+    tpmLimit: z<number, number, "defined">;
+    rpmLimit: z<number, number, "defined">;
+    safetyFactor: z<number, number, "defined">;
+    verbose: z<boolean, boolean, "defined">;
+    countFailedAttempts: z<boolean, boolean, "defined">;
+}>>, "plain">;
 /**
  * The rendered outcome a command handler returns.
  *
@@ -78,8 +85,11 @@ interface CommandDefinition {
 /**
  * The minimal structural view of the Cordis plugin context this plugin uses.
  *
- * Declaring it locally keeps the plugin independent of DSH's published type
- * packages while still type-checking every call site.
+ * The context stays a local shape — typing it from the host packages would
+ * couple this plugin to every package that augments `Context` — but the
+ * `llm/stream` payload uses the host's own `GenerateOptions` and `StreamChunk`
+ * types, so a change to that contract fails `tsc` here instead of surviving
+ * silently until an actual request.
  */
 interface PluginContext {
     /**
@@ -89,7 +99,7 @@ interface PluginContext {
      * in `'llm/stream'` must fail `tsc` instead of silently subscribing to an
      * event that never fires.
      */
-    on(name: 'llm/stream', handler: (options: unknown, next: () => AsyncIterable<unknown>) => unknown): void;
+    on(name: 'llm/stream', handler: (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>): void;
     /**
      * Register a lifecycle effect, disposed together with the plugin.
      *
@@ -97,7 +107,15 @@ interface PluginContext {
      * inside it has to be returned rather than dropped.
      */
     effect?(callback: () => void | (() => void)): void;
-    /** Injected timeout service. */
+    /**
+     * Injected timeout service.
+     *
+     * `timeout(ms)` resolves after the delay. The host implements it as a context
+     * effect, so disposing the plugin while a delay is pending rejects it
+     * ("Context has been disposed"). The web profile reloads patches live, so the
+     * delay site below tolerates that rejection rather than letting a reload turn
+     * into a failed request.
+     */
     timer: {
         timeout: (ms: number) => Promise<void>;
     };

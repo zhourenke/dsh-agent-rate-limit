@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Agent 速率限制",
+    "description": "按滑动窗口调节 agent 循环的 TPM/RPM 请求节奏，并逐次记录用量。"
+  }
+}

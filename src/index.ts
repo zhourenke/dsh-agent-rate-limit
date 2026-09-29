@@ -10,10 +10,17 @@
  * delegated to the built-in DSH `dsh-llm-retry` plugin via provider-level
  * `retryPolicy` configuration.
  *
+ * Verified against DSH 0.1.7-rc.2: the `llm/stream` Waterfall signature, the
+ * disjoint `TokenUsage` counts, the `error`/`aborted` finish reasons, and the
+ * injected `timer`/`commands` services are all unchanged from the version this
+ * plugin was first written against, and no shipped DSH package paces requests
+ * against a provider TPM/RPM quota.
+ *
  * @module @zhourenke/dsh-agent-rate-limit
  */
 
 import z from '@deepseek-ai/schemastery'
+import type { ContentBlock, GenerateOptions, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -207,6 +214,13 @@ function calculateDelay(estimatedInputTokens: number, now: number): number {
  * This is sufficient for rate-limiting purposes — we don't need
  * exact counts, just a conservative estimate to stay under the limit.
  *
+ * Deliberately not the host's `ctx.tokenMeter.estimateMessage`: that estimator
+ * prices at a fixed 4 chars/token, which understates CJK input by roughly
+ * 2.6x, and understating is the dangerous direction for a limiter — the window
+ * would admit more than the provider allows. The meter's own subject is
+ * context pressure rather than provider rate limits, and this function is only
+ * the cold-start fallback before the first real `usage` sample arrives.
+ *
  * @internal
  */
 function estimateTokens(text: string): number {
@@ -218,42 +232,45 @@ function estimateTokens(text: string): number {
 }
 
 /**
- * Extract text content from a ContentBlock recursively.
- * DSH messages carry content as ContentBlock[] (never a plain string).
+ * Price one content block under the local CJK-aware density.
+ *
+ * Images and files are never sent as bytes: request assembly projects each
+ * occurrence to handle or placeholder text, so the block's JSON size is the
+ * closest local proxy for what the provider actually receives. That is also how
+ * the host's own meter prices these blocks, its coarser density aside.
+ *
  * @internal
  */
-function extractBlockText(block: { type?: string; text?: string; arguments?: string; content?: unknown[] }): string {
-  if (block.type === 'text' || block.type === 'reasoning') {
-    return block.text ?? ''
+function estimateBlockTokens(block: ContentBlock): number {
+  switch (block.type) {
+    case 'text':
+    case 'reasoning':
+      return estimateTokens(block.text)
+    case 'tool-call':
+      return estimateTokens(block.name) + estimateTokens(block.arguments)
+    default:
+      return estimateTokens(JSON.stringify(block))
   }
-  if (block.type === 'tool-call') {
-    return block.arguments ?? ''
-  }
-  if (block.type === 'tool-result' && Array.isArray(block.content)) {
-    let text = ''
-    for (const child of block.content) {
-      text += extractBlockText(child as { type?: string; text?: string; arguments?: string; content?: unknown[] })
-    }
-    return text
-  }
-  return ''
 }
 
 /**
- * Estimate tokens from an array of DSH messages.
- * DSH Message.content is always ContentBlock[], never a plain string.
+ * Estimate the input tokens of one request.
+ *
+ * A loop-built request carries its assembled system prompt as the leading
+ * system-role message, so walking `messages` already covers it; the `system`
+ * field covers one-shot callers that pass the prompt separately. Tool schemas
+ * (`tools`) are not counted — they are a small serialized block compared with
+ * the conversation, and the first real `usage` sample supersedes this estimate
+ * for every later request.
+ *
  * @internal
  */
-function estimateTokensFromMessages(messages: Array<{ content?: unknown[] }>): number {
+function estimateRequestTokens(options: GenerateOptions): number {
   let total = 0
-  for (const msg of messages) {
-    const blocks = msg.content
-    if (Array.isArray(blocks)) {
-      for (const block of blocks) {
-        total += estimateTokens(extractBlockText(block as { type?: string; text?: string; arguments?: string; content?: unknown[] }))
-      }
-    }
+  for (const message of options.messages as readonly RequestMessage[]) {
+    for (const block of message.content) total += estimateBlockTokens(block)
   }
+  if (options.system !== undefined) total += estimateTokens(options.system)
   return total
 }
 
@@ -303,8 +320,11 @@ interface CommandDefinition {
 /**
  * The minimal structural view of the Cordis plugin context this plugin uses.
  *
- * Declaring it locally keeps the plugin independent of DSH's published type
- * packages while still type-checking every call site.
+ * The context stays a local shape — typing it from the host packages would
+ * couple this plugin to every package that augments `Context` — but the
+ * `llm/stream` payload uses the host's own `GenerateOptions` and `StreamChunk`
+ * types, so a change to that contract fails `tsc` here instead of surviving
+ * silently until an actual request.
  */
 interface PluginContext {
   /**
@@ -314,7 +334,10 @@ interface PluginContext {
    * in `'llm/stream'` must fail `tsc` instead of silently subscribing to an
    * event that never fires.
    */
-  on(name: 'llm/stream', handler: (options: unknown, next: () => AsyncIterable<unknown>) => unknown): void
+  on(
+    name: 'llm/stream',
+    handler: (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>,
+  ): void
   /**
    * Register a lifecycle effect, disposed together with the plugin.
    *
@@ -322,7 +345,15 @@ interface PluginContext {
    * inside it has to be returned rather than dropped.
    */
   effect?(callback: () => void | (() => void)): void
-  /** Injected timeout service. */
+  /**
+   * Injected timeout service.
+   *
+   * `timeout(ms)` resolves after the delay. The host implements it as a context
+   * effect, so disposing the plugin while a delay is pending rejects it
+   * ("Context has been disposed"). The web profile reloads patches live, so the
+   * delay site below tolerates that rejection rather than letting a reload turn
+   * into a failed request.
+   */
   timer: { timeout: (ms: number) => Promise<void> }
   /** Injected command registry; named in `inject`, so it is always present. */
   commands: { register(definition: CommandDefinition): () => void }
@@ -358,22 +389,28 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
    * if approaching TPM or RPM limits. After the stream, records the
    * actual token usage (input estimation + output count).
    */
-  ctx.on('llm/stream', (options: unknown, next: () => AsyncIterable<unknown>) => {
+  ctx.on('llm/stream', (options, next) => {
     // Get the original stream
     const originalStream = next()
 
     // Return a wrapped stream that adds delay before the first chunk
     // and counts output tokens
-    const wrappedStream = (async function* (): AsyncIterable<unknown> {
+    const wrappedStream = (async function* (): AsyncIterable<StreamChunk> {
       const now = Date.now()
-      const opts = options as { messages?: Array<{ content?: unknown[] }> }
-      const messages = opts.messages ?? []
+
+      // Auxiliary model calls (context compaction, session title) are marked
+      // with `purpose` by the agent loop. They spend real provider quota, so
+      // they are paced and counted exactly like any other request — but they
+      // stay out of the input-size average: a compaction prompt sits at the
+      // context ceiling and a title prompt is tiny, so either sample would
+      // mispredict the next ordinary request.
+      const auxiliary = options.purpose !== undefined
 
       // Use the average of recent actual input token counts from the API as the
       // estimate for this request — far more accurate than heuristic estimation.
       // The moving average smooths out variance across concurrent requests.
       // Fall back to heuristic estimation only for the very first request.
-      const estimatedInputTokens = getAverageInputTokens() || estimateTokensFromMessages(messages)
+      const estimatedInputTokens = getAverageInputTokens() || estimateRequestTokens(options)
 
       // Calculate and apply delay before the first chunk
       const delay = calculateDelay(estimatedInputTokens, now)
@@ -381,7 +418,15 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
         const currentTpm = sumWindow(now)
         const effectiveLimit = getEffectiveTpmLimit()
         if (verbose) console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
-        await ctx.timer.timeout(delay)
+        try {
+          await ctx.timer.timeout(delay)
+        } catch {
+          // A live patch reload disposes the pending delay — the host implements
+          // `timeout` as a context effect — which rejects it. The replacement
+          // activation owns pacing from that point on, and failing the request
+          // over a pause that is being torn down would be strictly worse.
+          if (verbose) console.log('[agent-rate-limit] Delay abandoned: the plugin was disposed while waiting')
+        }
       }
 
       // Stream chunks, capture actual API token usage, and detect failures
@@ -396,38 +441,32 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
       let usageCachedRead = 0
       let usageCachedWrite = 0
       for await (const chunk of originalStream) {
-        const chunkObj = chunk as {
-          type?: string
-          usage?: {
-            inputTokens: number
-            outputTokens: number
-            totalTokens?: number
-            cacheReadTokens?: number
-            cacheWriteTokens?: number
-          }
-          reason?: { kind?: string }
-        }
         // Capture the actual token usage from the API's usage chunk.
         // DSH's TokenUsage convention is DISJOINT: inputTokens is uncached input
         // only; cache hits arrive separately as cacheReadTokens/cacheWriteTokens.
         // We recombine every part to match the API's billed total.
-        if (chunkObj.type === 'usage' && chunkObj.usage) {
+        // `reasoningTokens` is an OUTPUT subset — dsh-token-meter's turn usage
+        // documents it that way — so adding it here would double-count.
+        if (chunk.type === 'usage') {
+          const usage: TokenUsage = chunk.usage
           usageSeen = true
-          usageUncached = chunkObj.usage.inputTokens
-          usageCachedRead = chunkObj.usage.cacheReadTokens ?? 0
-          usageCachedWrite = chunkObj.usage.cacheWriteTokens ?? 0
-          wireTotal = chunkObj.usage.totalTokens
+          usageUncached = usage.inputTokens
+          usageCachedRead = usage.cacheReadTokens ?? 0
+          usageCachedWrite = usage.cacheWriteTokens ?? 0
+          wireTotal = usage.totalTokens
           actualInputTokens = usageUncached + usageCachedRead + usageCachedWrite
-          actualOutputTokens = chunkObj.usage.outputTokens
+          actualOutputTokens = usage.outputTokens
         }
         // Detect terminal error/aborted finish chunks — the LLM adapter signals
         // failures (e.g. HTTP 429) as finish chunks, NOT by throwing. Without
         // this check, the for-await loop completes normally, and the code
         // below would incorrectly treat a failed attempt as a success.
-        if (chunkObj.type === 'finish' && chunkObj.reason) {
-          const reasonKind = chunkObj.reason.kind
-          finishReason = reasonKind ?? 'unknown'
-          if (reasonKind === 'error' || reasonKind === 'aborted') {
+        // `FinishReason` is merge-extensible, so any other kind — including a
+        // provider-specific one a third-party adapter adds — falls through as a
+        // completed attempt.
+        if (chunk.type === 'finish') {
+          finishReason = chunk.reason.kind
+          if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
             hadFailure = true
           }
         }
@@ -439,8 +478,10 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
       // Feed the input estimate from ANY attempt that reported usage, including
       // failed ones: a retry sends the same prompt, so the size a failed attempt
       // just revealed is exactly what the next attempt needs. 3 samples keeps it
-      // responsive to load changes.
-      if (usageSeen && actualInputTokens > 0) {
+      // responsive to load changes. Auxiliary calls are the one exception — they
+      // are counted in the window, but their size is not a representative sample
+      // for the next ordinary request.
+      if (!auxiliary && usageSeen && actualInputTokens > 0) {
         recentInputTokens.push(actualInputTokens)
         if (recentInputTokens.length > 3) recentInputTokens.shift()
       }
