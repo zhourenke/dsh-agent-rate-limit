@@ -114,6 +114,8 @@ New-Item -ItemType Junction -Path "$prof\node_modules\@zhourenke\dsh-agent-rate-
 
 并发时其他 Agent 仍在消耗配额，窗口排水比 `baseDelay` 假设的慢，因此**乘以超限比例** `max(1, currentTpm / effectiveTpmLimit)`。
 
+**RPM 分支不带这个倍数，是有意的，不是漏写**：它只在计数已经触到上限时才生效，超限比例按构造就是 ~1（一次并发涌入能把计数推过上限一点点，推不过一整个上限）。TPM 分支正相反——一条长 prompt 就能越过整个窗口，那才是倍数要修正的情形；给 RPM 的等待也乘一遍，只会把一个"最旧条目过期即可解决"的等待拉长。
+
 ### 4. 输入估算：取最近 3 次实际值的平均
 
 窗口为空时没有历史，只能按启发式估算。密度按字符类型分档（CJK 约 1.5 字符/令牌，其余约 3.5 字符/令牌），内容块按 0.1.7 的词表逐类计价：`text` / `reasoning` 按文本，`tool-call` 按 `name + arguments`，其余块（`image` / `file` 等）按引用结构的 JSON 长度计价。最后这一类不是随手兜底：图片与文件从不上传字节，请求装配会把它们投影成句柄或占位文本，所以结构长度是本地能拿到的、最接近"实际送出内容"的代理。系统提示词在循环构造的请求里是 `messages` 的首条 system 消息，因此遍历消息即可覆盖；`system` 字段另算一遍以覆盖一次性调用方。工具 schema（`options.tools`）不计入。

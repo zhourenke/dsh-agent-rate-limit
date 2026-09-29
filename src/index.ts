@@ -191,6 +191,13 @@ function calculateDelay(estimatedInputTokens: number, now: number): number {
   const currentRpm = windowEntries.length
 
   // 1. Check RPM limit
+  //    No overshoot ratio here, unlike the TPM branch below. This branch only
+  //    runs once the count has already reached the limit, so a ratio would be
+  //    ~1 by construction — a burst can push the count a little past the limit,
+  //    not a whole limit past it. The TPM branch is the opposite case: a single
+  //    long prompt can overshoot the entire window, which is what its ratio
+  //    corrects for. Scaling this delay up as well would only lengthen a wait
+  //    that one expiring entry already resolves.
   if (currentRpm >= rpmLimit && windowEntries.length > 0) {
     const oldest = windowEntries[0]
     const expireAt = oldest.timestamp + windowMs
