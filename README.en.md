@@ -101,7 +101,7 @@ Current:
 
 - **Counted per process**: the window lives inside the DSH process, so multiple DSH instances do not share it — running several profiles at once means each one computes against the full quota, and the total can still exceed it.
 - **Configuration is global across providers**: one configuration applies to every provider under that plugin instance; there is no way to give different providers different ceilings.
-- **The first request can only be estimated**: with an empty window there is no history, so input tokens are estimated heuristically; afterwards the average of the last 3 real API values is used.
+- **The first request can only be estimated**: with an empty window there is no history, so input tokens are priced by DSH's own estimator (a fixed 4 characters per token, which runs low for CJK); afterwards the average of the last 3 real API values is used.
 - **Side calls still occupy the window**: context compaction and session titles are counted too; they just do not feed the input-size estimate.
 - **A single oversized request cannot be split**: if one request alone approaches the quota, the plugin can only wait for it to slide out of the window, not break it up.
 - **No guarantee against throttling**: the goal is to sharply reduce the probability, not to prove it impossible. If something else consumes the quota at the same time a 429 can still occur — DSH's built-in retry takes over from there.
@@ -116,7 +116,7 @@ Current:
 
 ## Compatibility
 
-Tested with v0.1.7-rc.2 (2026-09).
+Tested with v0.2.0-rc.2 (2026-09).
 
 ## License
 

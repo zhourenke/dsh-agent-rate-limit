@@ -3,13 +3,17 @@
 # refuses them until they age out, so each exact version is listed here. The
 # list is exactly the transitive @deepseek-ai closure of `cordis` + `dsh-llm`,
 # recomputed from the host's own package.json files after each DSH upgrade.
+#
+# Only the current host version is listed: this plugin follows one DSH release
+# at a time, and `pnpm install` would otherwise merge the old version in with a
+# `||` selector, leaving entries for a release nothing here resolves to.
 minimumReleaseAgeExclude:
   - '@deepseek-ai/cordis@4.0.4'
   - '@deepseek-ai/cosmokit@1.8.5'
-  - '@deepseek-ai/dsh-brand@0.1.7-rc.2'
-  - '@deepseek-ai/dsh-llm@0.1.7-rc.2'
-  - '@deepseek-ai/dsh-timeout@0.1.7-rc.2'
-  - '@deepseek-ai/dsh-typert-protocol@0.1.7-rc.2'
-  - '@deepseek-ai/dsh-util-crypto@0.1.7-rc.2'
-  - '@deepseek-ai/dsh-util-values@0.1.7-rc.2'
+  - '@deepseek-ai/dsh-brand@0.2.0-rc.2'
+  - '@deepseek-ai/dsh-llm@0.2.0-rc.2'
+  - '@deepseek-ai/dsh-timeout@0.2.0-rc.2'
+  - '@deepseek-ai/dsh-typert-protocol@0.2.0-rc.2'
+  - '@deepseek-ai/dsh-util-crypto@0.2.0-rc.2'
+  - '@deepseek-ai/dsh-util-values@0.2.0-rc.2'
   - '@deepseek-ai/schemastery@3.18.4'

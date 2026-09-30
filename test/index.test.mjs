@@ -22,10 +22,12 @@ function makeCtx() {
   const listeners = new Map()
   const commands = []
   const timers = []
+  const pricedMessages = []
   return {
     listeners,
     commands,
     timers,
+    pricedMessages,
     ctx: {
       on(event, handler) {
         if (!listeners.has(event)) listeners.set(event, [])
@@ -36,16 +38,27 @@ function makeCtx() {
         // it inline is enough to reach the registration path.
         return callback()
       },
-      timer: {
-        timeout(ms) {
-          timers.push(ms)
-          return Promise.resolve()
-        },
+      // The timer service mixes `timeout` into the context, and Cordis refuses
+      // to read it at all unless `timer` is declared in `inject`.
+      timeout(ms) {
+        timers.push(ms)
+        return Promise.resolve()
       },
       commands: {
         register(definition) {
           commands.push(definition)
           return () => {}
+        },
+      },
+      // Stand-in for the host token meter. The contract under test is that the
+      // plugin asks the HOST to price each model-visible message, so the fake
+      // records what it was asked to price and charges a predictable rate.
+      tokenMeter: {
+        estimateMessage(message) {
+          pricedMessages.push(message)
+          let chars = 0
+          for (const block of message.content) chars += block.text?.length ?? 0
+          return Math.ceil(chars / 4) + 4
         },
       },
     },
@@ -300,7 +313,7 @@ test('a wire totalTokens mismatch is reported instead of silently skewing the wi
   assert.deepEqual(parseStatus(commands[0].handler()), { entries: 1, tpm: 15 })
 })
 
-test('an over-limit window delays the next request through ctx.timer.timeout', async () => {
+test('an over-limit window delays the next request through ctx.timeout', async () => {
   const { ctx, listeners, timers } = makeCtx()
   // A deliberately tiny limit so one recorded request already overshoots it.
   await apply(ctx, { tpmLimit: 100, safetyFactor: 1, rpmLimit: 15000 })
@@ -371,28 +384,30 @@ test('the same history without a purpose marker does feed the average', async ()
 // Cold-start estimation (no provider ever reported usage)
 //
 // A provider that reports no usage leaves the average empty, so every request
-// is priced by the local estimator — including the entry it records in the
-// window, which is what lets the estimate decide the next wait.
+// is priced by the host's estimator through `ctx.tokenMeter` — including the
+// entry it records in the window, which is what lets the estimate decide the
+// next wait.
 // ---------------------------------------------------------------------------
 
-test('a request with no usage report is priced by the estimator', async () => {
-  const { ctx, listeners, timers } = makeCtx()
+test('a request with no usage report is priced by the host estimator', async () => {
+  const { ctx, listeners, timers, pricedMessages } = makeCtx()
   await apply(ctx, { tpmLimit: 200, safetyFactor: 1, rpmLimit: 15000, verbose: true })
   const handler = listeners.get('llm/stream')[0]
 
-  // 400 ASCII characters at the local 3.5 chars/token density -> 115 tokens.
+  // The fake meter charges 4 per message plus 1 per 4 characters: 400 'a's -> 104.
   const options = { messages: [{ content: [{ type: 'text', text: 'a'.repeat(400) }] }] }
   const stream = [{ type: 'finish', reason: { kind: 'stop' } }]
 
   const logs = await captureLogs(() => runStream(handler, stream, options))
   assert.ok(
-    logs.includes('[agent-rate-limit] Recorded 115 tokens (estimated: 115i)'),
+    logs.includes('[agent-rate-limit] Recorded 104 tokens (estimated: 104i)'),
     `the estimator priced the request, got: ${JSON.stringify(logs)}`,
   )
+  assert.equal(pricedMessages.length, 1, 'the host meter priced the one message')
   assert.equal(timers.length, 0, 'the first request runs immediately')
 
-  // The window now holds 115 while no usage report ever arrived, so the same
-  // estimate is reused: target = 200 - 115 = 85 < 115, and the request waits.
+  // The window now holds 104 while no usage report ever arrived, so the same
+  // estimate is reused: target = 200 - 104 = 96 < 104, and the request waits.
   await runStream(handler, stream, options)
   assert.equal(timers.length, 1, 'the estimate sized the window and forced the wait')
 })
@@ -404,9 +419,57 @@ test('the estimate is derived per request, not cached', async () => {
   const stream = [{ type: 'finish', reason: { kind: 'stop' } }]
 
   await runStream(handler, stream, { messages: [{ content: [{ type: 'text', text: 'a'.repeat(400) }] }] })
-  // A 2-character prompt prices at 1 token: target = 199 > window 115.
+  // A 2-character prompt prices at 5 tokens: target = 195 > window 104.
   await runStream(handler, stream, { messages: [{ content: [{ type: 'text', text: 'hi' }] }] })
   assert.equal(timers.length, 0, 'a short prompt leaves room in the same window')
+})
+
+test('every model-visible message is priced by the host meter, and nothing else is', async () => {
+  const { ctx, listeners, pricedMessages } = makeCtx()
+  await apply(ctx, { tpmLimit: 1_000_000, safetyFactor: 1, rpmLimit: 15000 })
+  const handler = listeners.get('llm/stream')[0]
+
+  await runStream(handler, [{ type: 'finish', reason: { kind: 'stop' } }], {
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 's'.repeat(40) }] },
+      { role: 'user', content: [{ type: 'text', text: 'u'.repeat(40) }] },
+    ],
+    // A hand-built one-shot's separate `system` field is priced by no official
+    // estimator (the host's takes a message), so the plugin leaves it out rather
+    // than inventing a second density. The first real usage sample covers it.
+    system: 'x'.repeat(4000),
+  })
+
+  assert.deepEqual(
+    pricedMessages.map((message) => message.role),
+    ['system', 'user'],
+    'the host meter priced exactly the two messages',
+  )
+})
+
+test('an estimator that throws does not fail the request', async () => {
+  const { ctx, listeners } = makeCtx()
+  await apply(ctx, { tpmLimit: 100, safetyFactor: 1, rpmLimit: 15000, verbose: true })
+  const handler = listeners.get('llm/stream')[0]
+
+  // The estimator is total for host-shaped requests, so this guards the
+  // asymmetric failure mode: accounting must never abort a model call.
+  ctx.tokenMeter.estimateMessage = () => {
+    throw new Error('estimator exploded')
+  }
+
+  let received = []
+  const logs = await captureLogs(async () => {
+    received = await runStream(handler, [{ type: 'finish', reason: { kind: 'stop' } }], {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }],
+    })
+  })
+
+  assert.equal(received.length, 1, 'the chunk still reached the caller')
+  assert.ok(
+    logs.includes('[agent-rate-limit] Input estimate failed [estimator exploded]'),
+    `the failure was reported, got: ${JSON.stringify(logs)}`,
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -421,9 +484,10 @@ test('a delay disposed by a patch reload does not fail the request', async () =>
 
   await runStream(handler, stream, { messages: [] })
 
-  // The host implements `timeout` as a context effect, so disposing the plugin
-  // while a delay is pending rejects it. The chunks must still reach the caller.
-  ctx.timer.timeout = (ms) => {
+  // The host implements `timeout` as a context effect bound to the calling
+  // plugin's fiber, so disposing the plugin while a delay is pending rejects it.
+  // The chunks must still reach the caller.
+  ctx.timeout = (ms) => {
     timers.push(ms)
     return Promise.reject(new Error('Context has been disposed'))
   }
@@ -455,7 +519,7 @@ test('inject names exactly the services this plugin reads', () => {
   // `inject` gates activation: naming a service the plugin never touches holds
   // it back for an unrelated package, and omitting one it does touch leaves the
   // property undefined at activate time.
-  assert.deepEqual([...inject].sort(), ['commands', 'timer'])
+  assert.deepEqual([...inject].sort(), ['commands', 'timer', 'tokenMeter'])
 })
 
 test('the display metadata the Plugin Manager reads is present and valid', () => {

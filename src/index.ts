@@ -10,17 +10,20 @@
  * delegated to the built-in DSH `dsh-llm-retry` plugin via provider-level
  * `retryPolicy` configuration.
  *
- * Verified against DSH 0.1.7-rc.2: the `llm/stream` Waterfall signature, the
- * disjoint `TokenUsage` counts, the `error`/`aborted` finish reasons, and the
- * injected `timer`/`commands` services are all unchanged from the version this
- * plugin was first written against, and no shipped DSH package paces requests
- * against a provider TPM/RPM quota.
+ * Verified against DSH 0.2.0-rc.2. The `llm/stream` Waterfall signature still
+ * ends in a lazy `async *adapterStream`, so a listener's delay genuinely
+ * precedes the provider request; the `TokenUsage` counts stay disjoint; a
+ * failure still arrives as a `finish` chunk whose `reason.kind` is `error` or
+ * `aborted`; and the `timer`/`commands`/`tokenMeter` services this plugin reads
+ * are all present. No shipped DSH package paces requests against a provider
+ * TPM/RPM quota: `dsh-llm-retry` reacts to 429s after the fact, and
+ * `dsh-token-meter` measures context pressure, not rate limits.
  *
  * @module @zhourenke/dsh-agent-rate-limit
  */
 
 import z from '@deepseek-ai/schemastery'
-import type { ContentBlock, GenerateOptions, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, RequestMessage, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -244,71 +247,39 @@ function calculateDelay(estimatedInputTokens: number, now: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Roughly estimate the number of tokens in a text string.
- *
- * Heuristic: CJK characters average ~1.5 chars/token,
- * other characters average ~3.5 chars/token.
- * This is sufficient for rate-limiting purposes — we don't need
- * exact counts, just a conservative estimate to stay under the limit.
- *
- * Deliberately not the host's `ctx.tokenMeter.estimateMessage`: that estimator
- * prices at a fixed 4 chars/token, which understates CJK input by roughly
- * 2.6x, and understating is the dangerous direction for a limiter — the window
- * would admit more than the provider allows. The meter's own subject is
- * context pressure rather than provider rate limits, and this function is only
- * the cold-start fallback before the first real `usage` sample arrives.
- *
- * @internal
- */
-function estimateTokens(text: string): number {
-  if (text.length === 0) return 0
-  // Count CJK characters
-  const cjkChars = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g) || []).length
-  const otherChars = text.length - cjkChars
-  return Math.ceil(cjkChars / 1.5 + otherChars / 3.5)
-}
-
-/**
- * Price one content block under the local CJK-aware density.
- *
- * Images and files are never sent as bytes: request assembly projects each
- * occurrence to handle or placeholder text, so the block's JSON size is the
- * closest local proxy for what the provider actually receives. That is also how
- * the host's own meter prices these blocks, its coarser density aside.
- *
- * @internal
- */
-function estimateBlockTokens(block: ContentBlock): number {
-  switch (block.type) {
-    case 'text':
-    case 'reasoning':
-      return estimateTokens(block.text)
-    case 'tool-call':
-      return estimateTokens(block.name) + estimateTokens(block.arguments)
-    default:
-      return estimateTokens(JSON.stringify(block))
-  }
-}
-
-/**
  * Estimate the input tokens of one request.
  *
+ * Every model-visible message is priced by the host's own estimator — the
+ * `tokenMeter` service's `estimateMessage`, the same function behind the
+ * context-breakdown projection — so this cold-start fallback reports the numbers
+ * the rest of DSH reports for the same content, instead of a second density
+ * invented here.
+ *
  * A loop-built request carries its assembled system prompt as the leading
- * system-role message, so walking `messages` already covers it; the `system`
- * field covers one-shot callers that pass the prompt separately. Tool schemas
- * (`tools`) are not counted — they are a small serialized block compared with
- * the conversation, and the first real `usage` sample supersedes this estimate
- * for every later request.
+ * system-role message, so walking `messages` covers it. Two things are
+ * deliberately left out, both small against a prompt that is usually far
+ * larger: `options.system`, which only hand-built one-shot callers pass and
+ * which no official estimator prices outside a message, and the tool schemas,
+ * which the meter prices from a canonical envelope header this listener never
+ * sees. The first real `usage` sample supersedes the estimate for every later
+ * request, so neither omission can persist.
+ *
+ * The call is guarded. The host's estimator is total for host-shaped requests,
+ * and a throw here would otherwise abort every model call in the session; a
+ * limiter must never turn its own accounting into a failed request, so a throw
+ * degrades to "unknown size" and is reported.
  *
  * @internal
  */
-function estimateRequestTokens(options: GenerateOptions): number {
-  let total = 0
-  for (const message of options.messages) {
-    for (const block of message.content) total += estimateBlockTokens(block)
+function estimateRequestTokens(options: GenerateOptions, tokenMeter: PluginContext['tokenMeter']): number {
+  try {
+    let total = 0
+    for (const message of options.messages) total += tokenMeter.estimateMessage(message)
+    return total
+  } catch (error) {
+    console.log(`[agent-rate-limit] Input estimate failed [${error instanceof Error ? error.message : String(error)}]`)
+    return 0
   }
-  if (options.system !== undefined) total += estimateTokens(options.system)
-  return total
 }
 
 // ---------------------------------------------------------------------------
@@ -318,8 +289,8 @@ function estimateRequestTokens(options: GenerateOptions): number {
 /** Cordis plugin name used by loader diagnostics. */
 const name = 'agent-rate-limit'
 
-/** Hard dependency on the timer service and commands service. */
-const inject = ['timer', 'commands']
+/** Hard dependencies: the timer, the command registry, and the host token meter. */
+const inject = ['timer', 'commands', 'tokenMeter']
 
 /** Plugin configuration schema. */
 const Config = z.object({
@@ -388,17 +359,32 @@ interface PluginContext {
    */
   effect(callback: () => void | (() => void)): void
   /**
-   * Injected timeout service.
+   * Injected timeout helper, mixed into the context by the `timer` service.
    *
-   * `timeout(ms)` resolves after the delay. The host implements it as a context
-   * effect, so disposing the plugin while a delay is pending rejects it
-   * ("Context has been disposed"). The web profile reloads patches live, so the
+   * Cordis enforces the injection: reading `ctx.timeout` or `ctx.timer` without
+   * `timer` in `inject` throws `cannot get property "timer" without inject`. The
+   * service marks its older `setTimeout`/`setInterval` faces deprecated in favour
+   * of these mixed-in ones, so this plugin calls `ctx.timeout(ms)` directly.
+   *
+   * `timeout(ms)` resolves after the delay and is implemented as a context
+   * effect bound to the calling plugin's fiber — measured: both this face and
+   * `ctx.timer.timeout` reject with "Context has been disposed" once the plugin
+   * that called them is disposed. The web profile reloads patches live, so the
    * delay site below tolerates that rejection rather than letting a reload turn
    * into a failed request.
    */
-  timer: { timeout: (ms: number) => Promise<void> }
+  timeout(delay: number): Promise<void>
   /** Injected command registry; named in `inject`, so it is always present. */
   commands: { register(definition: CommandDefinition): () => void }
+  /**
+   * Injected host token meter; named in `inject`, so it is always present.
+   *
+   * Only `estimateMessage` is read. It prices one model-visible message under
+   * the host's fixed density — the numbers the context-breakdown projection
+   * reports for the same content — which is exactly what this plugin needs
+   * before the first real `usage` sample arrives.
+   */
+  tokenMeter: { estimateMessage: (message: RequestMessage) => number }
 }
 
 /**
@@ -450,10 +436,10 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
       const auxiliary = options.purpose !== undefined
 
       // Use the average of recent actual input token counts from the API as the
-      // estimate for this request — far more accurate than heuristic estimation.
+      // estimate for this request — no estimator beats a real measurement.
       // The moving average smooths out variance across concurrent requests.
-      // Fall back to heuristic estimation only for the very first request.
-      const estimatedInputTokens = getAverageInputTokens() || estimateRequestTokens(options)
+      // Fall back to the host's estimator only for the very first request.
+      const estimatedInputTokens = getAverageInputTokens() || estimateRequestTokens(options, ctx.tokenMeter)
 
       // Calculate and apply delay before the first chunk
       const delay = calculateDelay(estimatedInputTokens, now)
@@ -467,7 +453,7 @@ async function apply(ctx: PluginContext, config: Record<string, unknown>): Promi
           console.log(`[agent-rate-limit] Delaying ${delay}ms (TPM: ${currentTpm}/${Math.round(effectiveLimit)} ×${Math.max(1, currentTpm / effectiveLimit).toFixed(2)}, RPM: ${windowEntries.length}/${rpmLimit})`)
         }
         try {
-          await ctx.timer.timeout(delay)
+          await ctx.timeout(delay)
         } catch {
           // A live patch reload disposes the pending delay — the host implements
           // `timeout` as a context effect — which rejects it. The replacement

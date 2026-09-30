@@ -10,19 +10,22 @@
  * delegated to the built-in DSH `dsh-llm-retry` plugin via provider-level
  * `retryPolicy` configuration.
  *
- * Verified against DSH 0.1.7-rc.2: the `llm/stream` Waterfall signature, the
- * disjoint `TokenUsage` counts, the `error`/`aborted` finish reasons, and the
- * injected `timer`/`commands` services are all unchanged from the version this
- * plugin was first written against, and no shipped DSH package paces requests
- * against a provider TPM/RPM quota.
+ * Verified against DSH 0.2.0-rc.2. The `llm/stream` Waterfall signature still
+ * ends in a lazy `async *adapterStream`, so a listener's delay genuinely
+ * precedes the provider request; the `TokenUsage` counts stay disjoint; a
+ * failure still arrives as a `finish` chunk whose `reason.kind` is `error` or
+ * `aborted`; and the `timer`/`commands`/`tokenMeter` services this plugin reads
+ * are all present. No shipped DSH package paces requests against a provider
+ * TPM/RPM quota: `dsh-llm-retry` reacts to 429s after the fact, and
+ * `dsh-token-meter` measures context pressure, not rate limits.
  *
  * @module @zhourenke/dsh-agent-rate-limit
  */
 import z from '@deepseek-ai/schemastery';
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm';
+import type { GenerateOptions, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm';
 /** Cordis plugin name used by loader diagnostics. */
 declare const name = "agent-rate-limit";
-/** Hard dependency on the timer service and commands service. */
+/** Hard dependencies: the timer, the command registry, and the host token meter. */
 declare const inject: string[];
 /** Plugin configuration schema. */
 declare const Config: z<Schemastery.ObjectS<NoInfer<{
@@ -96,20 +99,35 @@ interface PluginContext {
      */
     effect(callback: () => void | (() => void)): void;
     /**
-     * Injected timeout service.
+     * Injected timeout helper, mixed into the context by the `timer` service.
      *
-     * `timeout(ms)` resolves after the delay. The host implements it as a context
-     * effect, so disposing the plugin while a delay is pending rejects it
-     * ("Context has been disposed"). The web profile reloads patches live, so the
+     * Cordis enforces the injection: reading `ctx.timeout` or `ctx.timer` without
+     * `timer` in `inject` throws `cannot get property "timer" without inject`. The
+     * service marks its older `setTimeout`/`setInterval` faces deprecated in favour
+     * of these mixed-in ones, so this plugin calls `ctx.timeout(ms)` directly.
+     *
+     * `timeout(ms)` resolves after the delay and is implemented as a context
+     * effect bound to the calling plugin's fiber — measured: both this face and
+     * `ctx.timer.timeout` reject with "Context has been disposed" once the plugin
+     * that called them is disposed. The web profile reloads patches live, so the
      * delay site below tolerates that rejection rather than letting a reload turn
      * into a failed request.
      */
-    timer: {
-        timeout: (ms: number) => Promise<void>;
-    };
+    timeout(delay: number): Promise<void>;
     /** Injected command registry; named in `inject`, so it is always present. */
     commands: {
         register(definition: CommandDefinition): () => void;
+    };
+    /**
+     * Injected host token meter; named in `inject`, so it is always present.
+     *
+     * Only `estimateMessage` is read. It prices one model-visible message under
+     * the host's fixed density — the numbers the context-breakdown projection
+     * reports for the same content — which is exactly what this plugin needs
+     * before the first real `usage` sample arrives.
+     */
+    tokenMeter: {
+        estimateMessage: (message: RequestMessage) => number;
     };
 }
 /**

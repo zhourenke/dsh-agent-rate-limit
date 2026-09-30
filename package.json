@@ -1,7 +1,7 @@
 {
   "name": "@zhourenke/dsh-agent-rate-limit",
   "description": "Agent loop rate limiter — prevents TPM/RPM limit violations by intercepting the LLM streaming pipeline and adding adaptive delays between requests",
-  "version": "0.1.7-rc2.1",
+  "version": "0.2.0-rc2.1",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zhourenke/dsh-agent-rate-limit.git"
@@ -41,7 +41,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-llm": "^0.1.7-rc.2"
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.2"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/dsh-llm": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.0-rc.2",
     "@types/node": "^22.20.2",
     "typescript": "5.9.3"
   }
