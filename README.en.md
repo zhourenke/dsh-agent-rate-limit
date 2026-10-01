@@ -94,7 +94,7 @@ Current:
 - **Passes through while there is headroom**: when the accumulated window plus this request's estimated input stays under the effective ceiling, the delay is `0`
 - **Queues only near the ceiling**: it waits until enough old entries slide out of the window to free up room
 - **Scales up under concurrency**: while you wait, other agents keep drawing on the quota, so the plugin multiplies the delay by the overshoot ratio
-- **Failed attempts are still accounted for**: an attempt that ends in `error` / `aborted` but reported usage **counts toward the window by default** (the upstream did process and bill that prompt); set `countFailedAttempts: false` to turn that off. Either way it is logged, so usage is never silently swallowed
+- **Failed attempts are still accounted for**: an attempt that ends in `error` / `aborted` but reported usage **counts toward the window by default** (the upstream did process and bill that prompt); set `countFailedAttempts: false` to turn that off. That switch changes accounting, never reporting: with `verbose: true` the attempt is logged either way, so usage is never silently swallowed
 - **The delay happens before dispatch**: waiting occurs before the stream starts and never interrupts a response already in flight
 
 ## Known limitations (measured)

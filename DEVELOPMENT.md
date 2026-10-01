@@ -116,6 +116,8 @@ New-Item -ItemType Junction -Path "$prof\node_modules\@zhourenke\dsh-agent-rate-
 
 **RPM 分支不带这个倍数，是有意的，不是漏写**：它只在计数已经触到上限时才生效，超限比例按构造就是 ~1（一次并发涌入能把计数推过上限一点点，推不过一整个上限）。TPM 分支正相反——一条长 prompt 就能越过整个窗口，那才是倍数要修正的情形；给 RPM 的等待也乘一遍，只会把一个"最旧条目过期即可解决"的等待拉长。
 
+**两处"窗口非空"守卫都是多余条件，已删。** RPM 分支原来写作 `currentRpm >= rpmLimit && windowEntries.length > 0`，但 `rpmLimit` 在状态初始化之前就过了护栏（必须为正），而 `currentRpm` 就是 `windowEntries.length`——**触到上限必然意味着窗口里至少有一条**，后半个条件永远为真（它若为假，说明护栏被绕过了，那是另一个 bug）。TPM 分支同样不需要：空窗口时 `currentTpm` 为 0，反向累加的循环根本不执行，函数自然落到"不延迟"——这也正是想要的语义，**等待排不干一个本来就空的窗口**。判据一致：条件要么由上游不变量保证，要么由循环自身的空集合语义覆盖，不要在第二处重复表达同一件事。
+
 ### 4. 输入估算：取最近 3 次实际值的平均
 
 窗口为空时没有历史，只能估算——而**估算这件事宿主已经实现过**，所以本轮把本地那份密度整个删掉，改成注入 `tokenMeter` 服务、逐条消息调用 `ctx.tokenMeter.estimateMessage(message)`。它就是宿主自己的估算器（渲染上下文占用的同一个函数：`text` / `reasoning` 按固定 4 字符/令牌外加每块开销，`tool-call` 按 `name + arguments`，其余块按引用结构的 JSON 长度），于是本插件报出的数字与 DSH 其它界面报出的数字同源，不再有第二套密度需要跟着宿主的词表维护。
@@ -156,7 +158,7 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 
 `schemastery` 的 `z.number()` 只检查类型，**`NaN` 与任意有限值都能通过**，范围约束也补不上这个洞——实测（3.18.4）：`z.number().min(1)` 拒绝 `0` 与 `-5`（`expected number >= 1 but got 0`），却**放行 `NaN`**。所以护栏只能写在消费这些数值的地方。
 
-它值得单列，是因为三种非法值都**静默失败、且方向各不相同**：`NaN` 让窗口比较全部为假，于是插件照常加载、照常打日志，却再也不产生任何延迟；`windowMs: 0` 表示任何条目一进窗口就被剪掉，窗口永远为空；`safetyFactor: 0` 把生效上限压成 0，于是每个请求都要等满一个窗口。前两种是"限速器悄悄不工作"，正是这个插件最不该出现的失败形态。
+它值得单列，是因为三种非法值都**静默失败、且方向各不相同**：`NaN` 让窗口比较全部为假，于是插件照常加载、命令照常回 `Status: loaded`，却再也不产生任何延迟；`windowMs: 0` 表示任何条目一进窗口就被剪掉，窗口永远为空；`safetyFactor: 0` 把生效上限压成 0，于是每个请求都要等满一个窗口。前两种是"限速器悄悄不工作"，正是这个插件最不该出现的失败形态。
 
 `apply` 因此在解析完配置、注册任何监听之前先做 `Number.isFinite(value) && value > 0`，不满足就抛错（错误里带字段名）。**这与宿主的既有行为一致**：cordis 的 `resolveConfig` 会用插件导出的 `Config` 校验配置，类型不对时直接抛 `ValidationError`，所以"数值非法"和"类型不对"是同一种响度。抛在注册之前还有一个好处——不会留下半注册的插件。
 
@@ -170,6 +172,7 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 - 用 `captureLogs()` 抓 `console.log` 断言日志形态：成功行**逐字**等于原格式 `Recorded N tokens (uncached: …, cached: …, output: …)` 且无尾标记，失败行在其后追加 `[<原因>]`，无 usage 的失败整行等于 `No usage reported [<原因>]`
 - 覆盖 `totalTokens` 与分项不一致时打印 `Recorded total mismatch (computed: …, reported: …)`，且窗口仍取分项之和
 - 覆盖超限路径，确认真的走到了 `ctx.timeout(`
+- 覆盖 **RPM 分支**（原先没有任何用例走到它，只有 TPM 分支被测过）：把 `rpmLimit` 压到 `1` 并配合超大的 `tpmLimit`，让延迟只可能来自计数上限；断言等待不超过一个窗口，这就是"该分支不乘超限比例"的可执行形式
 - 用**只差一个字段**的对照用例覆盖 `purpose`：同样的账目与限额下，带 `purpose` 的样本不进估算，不带的那次会进——这是唯一能把"辅助调用不参与平均"钉死的写法
 - 覆盖冷启动估算：provider 从不上报 usage 时，窗口按估算值记账，且下一次请求是否等待由该估算决定（同时证明估算值是每次请求现算、不缓存）
 - 覆盖估算的**委托对象**：假 ctx 里的 `tokenMeter.estimateMessage` 记录被问到过哪些消息，断言多消息请求里每一条都被宿主估算器计价、而 `system` 字段不被计价（这条测试是"估算由宿主实现"这句话的凭据，而不是对某个密度的断言）

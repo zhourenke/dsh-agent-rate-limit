@@ -333,6 +333,27 @@ test('an over-limit window delays the next request through ctx.timeout', async (
   assert.ok(timers[0] > 0, `delay must be positive, got ${timers[0]}`)
 })
 
+test('the request ceiling delays until the oldest entry expires, without a ratio', async () => {
+  const { ctx, listeners, timers } = makeCtx()
+  // Count-based, not token-based: one recorded request already reaches the
+  // ceiling while the token ceiling stays far out of reach, so only the RPM
+  // branch can produce a delay.
+  await apply(ctx, { tpmLimit: 1_000_000, safetyFactor: 1, rpmLimit: 1, windowMs: 60_000 })
+
+  const handler = listeners.get('llm/stream')[0]
+  const stream = billedAttempt(1)
+
+  await runStream(handler, stream, { messages: [] })
+  assert.equal(timers.length, 0, 'the first request runs immediately')
+
+  await runStream(handler, stream, { messages: [] })
+  assert.equal(timers.length, 1, 'the request ceiling delayed the second request')
+  // The wait targets the oldest entry's expiry plus the host's 100ms margin, so
+  // it stays within one window: unlike the TPM branch, this one carries no
+  // overshoot ratio to multiply it by.
+  assert.ok(timers[0] > 0 && timers[0] <= 60_100, `delay must target the window, got ${timers[0]}`)
+})
+
 // ---------------------------------------------------------------------------
 // Auxiliary calls (`purpose`)
 //
