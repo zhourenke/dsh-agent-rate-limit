@@ -24,6 +24,8 @@ pnpm run build      # 编译到 lib/
 pnpm test           # 先构建，再执行 lib/ 产物
 ```
 
+**命令的 shell 基线**：以上四条与本文档其它命令在 **`pwsh` 7.6.6（PowerShell Core）** 下逐条跑过（2026-10），退出码全为 0（`pnpm test` 为 24/24）。本机仍有 `powershell.exe` 5.1.26100.9168，但它**已不是默认 shell**——7 放行了 5.1 不允许的语法（`&&`、三元、`if` 作表达式，实测可用），所以凡"5.1 做不到 X"的结论都要在新 shell 下重新确认，不能沿用。本文档的片段只用两种 shell 都支持的形式；原生命令的引号传递实测仍是 `$PSNativeCommandArgumentPassing = Windows`，与 5.1 行为一致。
+
 **每次修改 `src/index.ts` 后必须运行 `pnpm run build`，并把 `lib/` 一并提交。**
 
 `pnpm test` 不是可选项。`tsc` 只做类型检查与转译，漂移检查只看 git 状态——**没有任何一步执行过产物**。于是「模块在 import 时抛错」（导入了宿主已删除的符号、在顶层解构了 `undefined`）可以一路绿灯，直到用户重启 DSH 才在启动日志里爆出来。测试直接 `import` 编译产物，用模拟 ctx 走一遍加载、事件注册、流包装与窗口记账。
@@ -37,15 +39,24 @@ pnpm test           # 先构建，再执行 lib/ 产物
 用目录连接点把插件挂进 profile 的 `node_modules`，改完 `pnpm run build` 再重启即可，不必每次重新安装：
 
 ```powershell
+$prof = "$env:USERPROFILE\.dsh\profiles\web"
 [System.IO.Directory]::CreateDirectory("$prof\node_modules\@zhourenke") | Out-Null
 New-Item -ItemType Junction -Path "$prof\node_modules\@zhourenke\dsh-agent-rate-limit" -Target $PWD
 ```
+
+**`$prof` 不能省。** PowerShell 里未定义变量插值成空串，`"$prof\node_modules\…"` 于是变成盘根下的 `\node_modules\…`：实测会真的建出 `C:\node_modules\@zhourenke`，命令一声不响，而连接点建在那儿 DSH 永远看不到插件。（`-Target $PWD` 在 pwsh 7 下实测正常，`LinkType` 为 `Junction`。）
 
 **连接点会绕过 profile 里已提升的依赖**：Node 按 realpath 解析后沿工作区路径向上找 `node_modules`，所以插件目录里必须自己 `pnpm install` 一份，否则启动时报 `Cannot find package '@deepseek-ai/schemastery'`。
 
 **改配置不需要重启，改代码才需要。** profile 的补丁层是热重载的（`patchReload: live`，由 Cordis HMR 监视，见 `PLUGIN_RELEASE_GUIDE.md`「发布与生效」）：编辑 `~/.dsh/profiles/web/cordis.patch.yml` 里的 `config:` 保存即生效，调参时不必反复重启。但 `lib/` 的变更**必须重启**才会重新加载——热重载重组的只是补丁层，bundle 与模块在进程启动时就已确定。
 
-注意连接点挂载的插件**无法用 `dsh plugin remove` 卸载**（它不在 profile 的 `dependencies` 里），需要手工删连接点再摘掉 `dsh.profile.bundles` 条目。
+注意连接点挂载的插件**无法用 `dsh plugin remove` 卸载**（它不在 profile 的 `dependencies` 里），需要手工删连接点再摘掉 `dsh.profile.bundles` 条目。删连接点用"不递归"的那次调用：
+
+```powershell
+[System.IO.Directory]::Delete("$prof\node_modules\@zhourenke\dsh-agent-rate-limit", $false)
+```
+
+第二个参数 `$false` 表示只摘连接点本身，不跟进去删目标：实测摘除后目标目录内容完好。
 
 ## 配置面：包内 patch 与 profile patch
 
