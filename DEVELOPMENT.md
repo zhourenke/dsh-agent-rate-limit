@@ -220,7 +220,7 @@ schemastery 写 `~` 而不是 `^`，是为了与宿主声明的范围一致：�
 
 **这两条 peer 会参与宿主启动时的准入判定。** 宿主只统计名字为 `@deepseek-ai/dsh` 或以 `@deepseek-ai/dsh-` 开头的 peer（因此 cordis 不参与），按 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定；不匹配的插件默认不装载，除非在 profile 的豁免表里点名放行。`includePrerelease: true` 意味着 `^0.2.0-rc.2` 既匹配当前宿主，也放行同一 minor 线内后续的预发布版（rc.3、正式 0.2.0……），但**不跨 minor**；因此多代支持窗口下显式声明双轨范围 `^0.2.0-rc.2 || ^0.2.1-rc.2`。测试 `test/index.test.mjs` 断言所有宿主 peer 范围一致且与 README 兼容行一一对应。
 
-**版本号怎么算、什么时候改**（按 `PLUGIN_RELEASE_GUIDE.md` §2.11）：双轨支持窗口下，版本号遵循**下界原则**依然保持在下界的 `0.2.0-rc2.1`（保障依赖 `^0.2.0-rc2.1` 的老消费方能自动平滑升级，窗口上界由 `peerDependencies` 与 README 表达；下次 tuple 迁移至 `0.2.1` 时采用保留点的 `rc.2.N` 形状，如 `0.2.1-rc.2.1`）。改号只在用户要求时发生——用户没提就不要动 `package.json` 的 `version`。
+**版本号怎么算、什么时候改**（按 `PLUGIN_RELEASE_GUIDE.md` §2.11）：双轨支持窗口下，版本号遵循**下界原则**依然保持在下界元组（当前为 `0.2.0-rc2.2`，保障依赖 `^0.2.0-rc2.1` 的老消费方能自动平滑升级，窗口上界由 `peerDependencies` 与 README 表达；下次 tuple 迁移至 `0.2.1` 时采用保留点的 `rc.2.N` 形状，如 `0.2.1-rc.2.1`）。改号只在用户要求时发生——用户没提就不要动 `package.json` 的 `version`。
 
 **没有 `@deepseek-ai/dsh-llm-retry` 的声明。** 重试由宿主的那个插件负责，本插件既不监听 `agent/request-error` 也不 import 它——声明一个代码从不接触的 peer 只会让声明与实现不一致。
 
