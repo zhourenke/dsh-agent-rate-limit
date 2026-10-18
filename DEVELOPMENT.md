@@ -207,16 +207,20 @@ ctx.effect?.(() => ctx.commands.register({ name, description, handler }))
 | 包 | 版本 | 用途 |
 |---|---|---|
 | `@deepseek-ai/cordis` | `^4.0.4` | 插件框架（走自己的版本线） |
-| `@deepseek-ai/dsh-llm` | `^0.2.0-rc.2` | `llm/stream` 的载荷类型。源码只有 `import type`，编译产物不装载它 |
+| `@deepseek-ai/dsh-llm` | `^0.2.0-rc.2 \|\| ^0.2.1-rc.2` | `llm/stream` 的载荷类型。源码只有 `import type`，编译产物不装载它 |
 | `@deepseek-ai/schemastery` | `~3.18.4` | 配置校验，**唯一真实的 `dependencies`** |
+
+已测试版本：**DSH v0.2.0-rc.2**（2026-09）与 **v0.2.1-rc.2**（2026-10），双轨支持。
 
 schemastery 写 `~` 而不是 `^`，是为了与宿主声明的范围一致：宿主自己也钉在 `~3.18.4`，范围一旦放宽到下一个 minor，pnpm 就可能装出第二份 `schemastery`，让 `Config` 的类型在宿主侧变成两个实体（TS2883）。
 
 **服务型能力不写进依赖。** `timer` / `commands` / `tokenMeter` 都是宿主已装载的服务：插件只用 `inject` 声明、用本地结构接口读取，`package.json` 里不出现这些包名。`tokenMeter` 尤其值得记一笔——`@deepseek-ai/dsh-token-meter` 的 `estimate` 子路径是不依赖任何服务的纯函数，完全可以直接 import，但那样会把该包连同它的依赖（`zod`、`dsh-util-values` 等）拖进**每一次插件安装**，而走服务则一个字节都不增加，还自动跟着宿主升级。判断标准：能用宿主已装载的服务就别 import 包，只有服务面确实拿不到所需数据时才考虑直接依赖。
 
-`devDependencies` 中的两个宿主包**钉死到精确版本**（`4.0.4` / `0.2.0-rc.2`）：连接点安装时插件解析到的是自己 `node_modules` 里的副本，写范围就会对着与线上不同的宿主做类型检查与测试。
+`devDependencies` 中的两个宿主包**钉死到精确基线版本**（`4.0.4` / `0.2.0-rc.2`）：连接点安装时插件解析到的是自己 `node_modules` 里的副本，写范围就会对着与线上不同的宿主做类型检查与测试。next 版本的类型与端到端在 `_next-compat/rate-limit/` 隔离环境中复核。
 
-**这两条 peer 会参与宿主启动时的准入判定。** 宿主只统计名字为 `@deepseek-ai/dsh` 或以 `@deepseek-ai/dsh-` 开头的 peer（因此 cordis 不参与），按 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定；不匹配的插件默认不装载，除非在 profile 的豁免表里点名放行。`includePrerelease: true` 意味着 `^0.2.0-rc.2` 既匹配当前宿主，也放行同一 minor 线内后续的预发布版（rc.3、正式 0.2.0……），但**不跨 minor**：本插件只跟随一条宿主版本线，0.1.x 那一代已经不在服务范围内。本轮把清单直接喂给宿主自己的判定函数验证过——对 0.2.0-rc.2 判为放行，对 0.1.7-rc.2 判为拒绝并给出 `{"@deepseek-ai/dsh-llm":"^0.2.0-rc.2"}`，正是想要的结果。
+**这两条 peer 会参与宿主启动时的准入判定。** 宿主只统计名字为 `@deepseek-ai/dsh` 或以 `@deepseek-ai/dsh-` 开头的 peer（因此 cordis 不参与），按 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 判定；不匹配的插件默认不装载，除非在 profile 的豁免表里点名放行。`includePrerelease: true` 意味着 `^0.2.0-rc.2` 既匹配当前宿主，也放行同一 minor 线内后续的预发布版（rc.3、正式 0.2.0……），但**不跨 minor**；因此多代支持窗口下显式声明双轨范围 `^0.2.0-rc.2 || ^0.2.1-rc.2`。测试 `test/index.test.mjs` 断言所有宿主 peer 范围一致且与 README 兼容行一一对应。
+
+**版本号怎么算、什么时候改**（按 `PLUGIN_RELEASE_GUIDE.md` §2.11）：双轨支持窗口下，版本号遵循**下界原则**依然保持在下界的 `0.2.0-rc2.1`（保障依赖 `^0.2.0-rc2.1` 的老消费方能自动平滑升级，窗口上界由 `peerDependencies` 与 README 表达；下次 tuple 迁移至 `0.2.1` 时采用保留点的 `rc.2.N` 形状，如 `0.2.1-rc.2.1`）。改号只在用户要求时发生——用户没提就不要动 `package.json` 的 `version`。
 
 **没有 `@deepseek-ai/dsh-llm-retry` 的声明。** 重试由宿主的那个插件负责，本插件既不监听 `agent/request-error` 也不 import 它——声明一个代码从不接触的 peer 只会让声明与实现不一致。
 
@@ -244,6 +248,22 @@ DSH 升级后按 `PLUGIN_RELEASE_GUIDE.md`「DSH 升级后的复核」重新核�
 判定方式值得单独记一笔：把本仓库的清单直接喂给宿主自己的 `evaluatePluginCompatibility()`，得到"无冲突"；再用宿主自己的 `readPluginMeta()` 读出两份字典与图标（图标被解析成内联 data URL）。**用宿主函数验证集成面，比人工比对文档可靠**——这是本仓库唯一能证明"宿主真的读到了"的办法。
 
 本轮看过但**决定不采纳**的宿主能力，理由留档：`finish.reason.failure` 上的 `code` / `status` / `providerRetryAfterMs`（可把 provider 建议的退避时长种进冷却窗口，但要改行为或日志格式）；`llm.imageRequestPricing(provider, model).priceImages(images)`（图片本可按路由真实视觉令牌计价，但图片在请求装配里会被投影成句柄或占位，复现那套投影是适配器的职责，而插件只做冷启动估算，用宿主估算器的结构计价已与上下文界面同源）；`isAgentLoopRequest()`（可作"是否为循环构造的请求"的第二判据，但 `purpose` 已经是官方给旁路的信号，多一个判据只会让冷启动估算多一条分支）。
+
+### 0.2.1-rc.2 复核与实测结论
+
+在 `_next-compat/rate-limit/` 隔离环境中分别完成了类型静态检查与真实 DSH 0.2.1-rc.2 宿主的全链路端到端验证：
+
+1. **类型与单元测试验证**：
+   - 依赖指向 `@deepseek-ai/dsh-llm@0.2.1-rc.2` 与 `@deepseek-ai/cordis@4.0.5`；
+   - `pnpm run typecheck` 退出码 0，全套 25 项测试全绿，`src/` 核心逻辑零改动。
+2. **真实宿主端到端全链路验证（`_next-compat/rate-limit/e2e-probe.mjs`）**：
+   - 使用隔离 profile `test-rate-limit`，通过真实 DSH 0.2.1-rc.2 启动 Web 服务于动态端口，完全不干扰正在运行的 3080 服务与现网进程；
+   - 宿主 Cordis Loader 成功解析 bundle patch，正确挂载 `@zhourenke/dsh-agent-rate-limit`；
+   - `commands` / `agents` / `tokenMeter` / `timer` 四大注入服务全部就绪；
+   - 创建 live Agent 并成功执行 `/agent-rate-limit`，正确返回 `Status: loaded`；
+   - 宿主 `tokenMeter.estimateMessage()` 成功估算输入消息令牌；
+   - `llm/stream` waterfall 拦截管道全链路打通：模拟适配器分块与用量（165 tokens）流转后，滑动窗口准确记账并在 `/agent-rate-limit` 状态中即时体现（1 条目，165 TPM）；
+   - 验证完成后释放 Agent 句柄，宿主优雅停机退出。
 
 ## 许可证
 
